@@ -76,9 +76,19 @@ function Root() {
         if (currentUser) setUser(currentUser)
         setReady(true)
 
+        // Detect invite_token or recovery_token in URL and open widget
+        const hash = window.location.hash
+        if (hash && (hash.includes('invite_token') || hash.includes('recovery_token') || hash.includes('confirmation_token'))) {
+          setTimeout(() => {
+            window.netlifyIdentity.open()
+          }, 500)
+        }
+
         window.netlifyIdentity.on('login', (u) => {
           setUser(u)
           window.netlifyIdentity.close()
+          // Clean URL
+          window.history.replaceState({}, document.title, '/')
         })
 
         window.netlifyIdentity.on('logout', () => {
