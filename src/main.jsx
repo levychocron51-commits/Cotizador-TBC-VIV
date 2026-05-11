@@ -61,40 +61,50 @@ function LoginScreen({ onLogin }) {
 
 function Root() {
   const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    window.netlifyIdentity.init({
-      APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
-    })
+    function initIdentity() {
+      if (!window.netlifyIdentity) {
+        setTimeout(initIdentity, 100)
+        return
+      }
 
-    const identity = window.netlifyIdentity
+      window.netlifyIdentity.init({
+        APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
+      })
 
-    const currentUser = identity.currentUser()
-    if (currentUser) {
-      setUser(currentUser)
+      window.netlifyIdentity.on('init', (u) => {
+        if (u) setUser(u)
+        setReady(true)
+      })
+
+      window.netlifyIdentity.on('login', (u) => {
+        setUser(u)
+        window.netlifyIdentity.close()
+      })
+
+      window.netlifyIdentity.on('logout', () => {
+        setUser(null)
+      })
     }
-    setLoading(false)
 
-    identity.on('login', (u) => {
-      setUser(u)
-      identity.close()
-    })
-
-    identity.on('logout', () => {
-      setUser(null)
-    })
+    initIdentity()
   }, [])
 
   function handleLogin() {
-    window.netlifyIdentity.open('login')
+    if (window.netlifyIdentity) {
+      window.netlifyIdentity.open('login')
+    }
   }
 
   function handleLogout() {
-    window.netlifyIdentity.logout()
+    if (window.netlifyIdentity) {
+      window.netlifyIdentity.logout()
+    }
   }
 
-  if (loading) {
+  if (!ready) {
     return (
       <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center'}}>
         <div style={{color:'#C8A46A',fontSize:14}}>Cargando...</div>
