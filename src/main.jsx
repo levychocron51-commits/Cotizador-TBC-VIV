@@ -64,44 +64,38 @@ function Root() {
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    function initIdentity() {
-      if (!window.netlifyIdentity) {
-        setTimeout(initIdentity, 100)
-        return
-      }
+    const check = setInterval(() => {
+      if (window.netlifyIdentity) {
+        clearInterval(check)
 
-      window.netlifyIdentity.init({
-        APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
-      })
+        window.netlifyIdentity.init({
+          APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
+        })
 
-      window.netlifyIdentity.on('init', (u) => {
-        if (u) setUser(u)
+        const currentUser = window.netlifyIdentity.currentUser()
+        if (currentUser) setUser(currentUser)
         setReady(true)
-      })
 
-      window.netlifyIdentity.on('login', (u) => {
-        setUser(u)
-        window.netlifyIdentity.close()
-      })
+        window.netlifyIdentity.on('login', (u) => {
+          setUser(u)
+          window.netlifyIdentity.close()
+        })
 
-      window.netlifyIdentity.on('logout', () => {
-        setUser(null)
-      })
-    }
+        window.netlifyIdentity.on('logout', () => {
+          setUser(null)
+        })
+      }
+    }, 100)
 
-    initIdentity()
+    return () => clearInterval(check)
   }, [])
 
   function handleLogin() {
-    if (window.netlifyIdentity) {
-      window.netlifyIdentity.open('login')
-    }
+    window.netlifyIdentity.open('login')
   }
 
   function handleLogout() {
-    if (window.netlifyIdentity) {
-      window.netlifyIdentity.logout()
-    }
+    window.netlifyIdentity.logout()
   }
 
   if (!ready) {
