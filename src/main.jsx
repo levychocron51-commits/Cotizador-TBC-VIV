@@ -13,58 +13,69 @@ function getUserRoles() {
   }
 }
 
-function hasIdentityToken() {
-  const hash = window.location.hash
-  return hash && (
-    hash.includes('invite_token') ||
-    hash.includes('recovery_token') ||
-    hash.includes('confirmation_token')
-  )
-}
-
-// Registrar los listeners ANTES de que React monte cualquier cosa
-// El script de netlify-identity-widget ya cargo en index.html
-// asi que window.netlifyIdentity ya existe aqui
-const ni = window.netlifyIdentity
-ni.on('init', () => {})
-ni.on('login', () => {})
-ni.on('logout', () => {})
-ni.init({
-  APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
-})
-
 function Root() {
-  const [user, setUser] = useState(() => {
-    try { return window.netlifyIdentity.currentUser() || null }
-    catch(e) { return null }
-  })
+  const [user, setUser] = useState(null)
   const [ready, setReady] = useState(false)
-  const [tokenMode] = useState(hasIdentityToken())
 
   useEffect(() => {
     const ni = window.netlifyIdentity
+    if (!ni) {
+      setReady(true)
+      return
+    }
 
-    ni.on('init', (u) => {
+    // Si ya hay un usuario guardado en localStorage, usarlo de una vez
+    const existingUser = ni.currentUser()
+    if (existingUser) {
+      setUser(existingUser)
+      setReady(true)
+    }
+
+    const handleInit = (u) => {
       if (u) setUser(u)
       setReady(true)
-    })
-
-    ni.on('login', (u) => {
+      // Despues del init, revisar si llego un usuario via external provider
+      setTimeout(() => {
+        const u2 = ni.currentUser()
+        if (u2) setUser(u2)
+      }, 500)
+    }
+    const handleLogin = (u) => {
       setUser(u)
       ni.close()
       window.history.replaceState({}, document.title, '/')
-    })
-
-    ni.on('logout', () => {
+    }
+    const handleLogout = () => {
       setUser(null)
+    }
+
+    ni.on('init', handleInit)
+    ni.on('login', handleLogin)
+    ni.on('logout', handleLogout)
+
+    ni.init({
+      APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
     })
 
-    // Fallback por si el evento init ya disparo antes del useEffect
-    setReady(true)
+    // Fallback: revisar currentUser despues de 2s por si el evento se perdio
+    const fallback = setTimeout(() => {
+      const u = ni.currentUser()
+      if (u) setUser(u)
+      setReady(true)
+    }, 2000)
+
+    return () => {
+      clearTimeout(fallback)
+      try {
+        ni.off('init', handleInit)
+        ni.off('login', handleLogin)
+        ni.off('logout', handleLogout)
+      } catch(e) {}
+    }
   }, [])
 
-  function handleLogin() { window.netlifyIdentity.open('login') }
-  function handleLogout() { window.netlifyIdentity.logout() }
+  function handleLoginClick() { window.netlifyIdentity.open('login') }
+  function handleLogoutClick() { window.netlifyIdentity.logout() }
 
   if (!ready) return (
     <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center'}}>
@@ -82,37 +93,16 @@ function Root() {
     return <App
       defaultEmpresa={defaultEmpresa}
       onlyEmpresa={hasTBC && !hasVivendi ? 'TBC' : hasVivendi && !hasTBC ? 'VIVENDI' : null}
-      onLogout={handleLogout}
+      onLogout={handleLogoutClick}
     />
   }
 
-  // Con token: pantalla de espera, el widget abre su modal solo
-  if (tokenMode) return (
-    <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"-apple-system,sans-serif"}}>
-      <div style={{background:'#111',border:'1px solid #222',borderRadius:16,padding:'48px 40px',maxWidth:400,width:'100%',textAlign:'center'}}>
-        <p style={{color:'#C8A46A',fontSize:22,fontWeight:700,marginBottom:8}}>The Blind Concept</p>
-        <p style={{color:'#666',fontSize:13,marginBottom:24}}>Abriendo formulario de acceso...</p>
-        <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8,marginBottom:24}}>
-          <div style={{width:8,height:8,borderRadius:'50%',background:'#B8965A',animation:'pulse 1.2s ease-in-out infinite'}}></div>
-          <div style={{width:8,height:8,borderRadius:'50%',background:'#B8965A',animation:'pulse 1.2s ease-in-out 0.4s infinite'}}></div>
-          <div style={{width:8,height:8,borderRadius:'50%',background:'#B8965A',animation:'pulse 1.2s ease-in-out 0.8s infinite'}}></div>
-        </div>
-        <style>{`@keyframes pulse{0%,100%{opacity:0.2}50%{opacity:1}}`}</style>
-        <p style={{color:'#555',fontSize:11,cursor:'pointer'}}
-           onClick={() => window.history.replaceState({}, document.title, window.location.pathname + window.location.search) || window.location.reload()}>
-          Si no se abre nada, haz clic aqui para recargar
-        </p>
-      </div>
-    </div>
-  )
-
-  // Sin token: pantalla normal de login
   return (
     <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"-apple-system,sans-serif"}}>
       <div style={{background:'#111',border:'1px solid #222',borderRadius:16,padding:'48px 40px',maxWidth:400,width:'100%',textAlign:'center'}}>
         <p style={{color:'#C8A46A',fontSize:22,fontWeight:700,marginBottom:8}}>The Blind Concept</p>
         <p style={{color:'#666',fontSize:13,marginBottom:32}}>Acceso exclusivo para colaboradores</p>
-        <button onClick={handleLogin} style={{width:'100%',padding:'14px 24px',background:'#B8965A',border:'none',borderRadius:12,color:'#fff',fontSize:15,fontWeight:700,cursor:'pointer'}}>
+        <button onClick={handleLoginClick} style={{width:'100%',padding:'14px 24px',background:'#B8965A',border:'none',borderRadius:12,color:'#fff',fontSize:15,fontWeight:700,cursor:'pointer'}}>
           Iniciar Sesion
         </button>
       </div>
