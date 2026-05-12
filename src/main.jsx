@@ -13,53 +13,54 @@ function getUserRoles() {
   }
 }
 
-// Detecta si la URL tiene un token de Netlify Identity
 function hasIdentityToken() {
-  return window.location.hash &&
-    (window.location.hash.includes('invite_token') ||
-     window.location.hash.includes('recovery_token') ||
-     window.location.hash.includes('confirmation_token'))
+  const hash = window.location.hash
+  return hash && (
+    hash.includes('invite_token') ||
+    hash.includes('recovery_token') ||
+    hash.includes('confirmation_token')
+  )
 }
 
+// Registrar los listeners ANTES de que React monte cualquier cosa
+// El script de netlify-identity-widget ya cargo en index.html
+// asi que window.netlifyIdentity ya existe aqui
+const ni = window.netlifyIdentity
+ni.on('init', () => {})
+ni.on('login', () => {})
+ni.on('logout', () => {})
+ni.init({
+  APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
+})
+
 function Root() {
-  const [user, setUser] = useState(null)
-  // Si hay token en la URL arrancamos en ready=true directamente
-  // para que el widget pueda montar el modal sin esperar
-  const [ready, setReady] = useState(hasIdentityToken())
+  const [user, setUser] = useState(() => {
+    try { return window.netlifyIdentity.currentUser() || null }
+    catch(e) { return null }
+  })
+  const [ready, setReady] = useState(false)
+  const [tokenMode] = useState(hasIdentityToken())
 
   useEffect(() => {
-    const check = setInterval(() => {
-      if (!window.netlifyIdentity) return
-      clearInterval(check)
-      const ni = window.netlifyIdentity
+    const ni = window.netlifyIdentity
 
-      ni.on('init', (u) => {
-        if (u) setUser(u)
-        setReady(true)
-        // Si hay token, abrir el widget inmediatamente
-        if (hasIdentityToken()) {
-          ni.open()
-        }
-      })
+    ni.on('init', (u) => {
+      if (u) setUser(u)
+      setReady(true)
+    })
 
-      ni.on('login', (u) => {
-        setUser(u)
-        ni.close()
-        window.history.replaceState({}, document.title, '/')
-      })
+    ni.on('login', (u) => {
+      setUser(u)
+      ni.close()
+      window.history.replaceState({}, document.title, '/')
+    })
 
-      ni.on('logout', () => {
-        setUser(null)
-      })
+    ni.on('logout', () => {
+      setUser(null)
+    })
 
-      ni.init({
-        APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
-      })
-
-      setTimeout(() => setReady(true), 5000)
-    }, 50)
-
-    return () => clearInterval(check)
+    // Fallback por si el evento init ya disparo antes del useEffect
+    setReady(true)
   }, [])
 
   function handleLogin() { window.netlifyIdentity.open('login') }
@@ -71,7 +72,42 @@ function Root() {
     </div>
   )
 
-  if (!user) return (
+  if (user) {
+    const roles = getUserRoles()
+    const hasTBC = roles.includes('tbc') || roles.includes('ambos')
+    const hasVivendi = roles.includes('vivendi') || roles.includes('ambos')
+    let defaultEmpresa = ''
+    if (hasTBC && !hasVivendi) defaultEmpresa = 'TBC'
+    if (hasVivendi && !hasTBC) defaultEmpresa = 'VIVENDI'
+    return <App
+      defaultEmpresa={defaultEmpresa}
+      onlyEmpresa={hasTBC && !hasVivendi ? 'TBC' : hasVivendi && !hasTBC ? 'VIVENDI' : null}
+      onLogout={handleLogout}
+    />
+  }
+
+  // Con token: pantalla de espera, el widget abre su modal solo
+  if (tokenMode) return (
+    <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"-apple-system,sans-serif"}}>
+      <div style={{background:'#111',border:'1px solid #222',borderRadius:16,padding:'48px 40px',maxWidth:400,width:'100%',textAlign:'center'}}>
+        <p style={{color:'#C8A46A',fontSize:22,fontWeight:700,marginBottom:8}}>The Blind Concept</p>
+        <p style={{color:'#666',fontSize:13,marginBottom:24}}>Abriendo formulario de acceso...</p>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8,marginBottom:24}}>
+          <div style={{width:8,height:8,borderRadius:'50%',background:'#B8965A',animation:'pulse 1.2s ease-in-out infinite'}}></div>
+          <div style={{width:8,height:8,borderRadius:'50%',background:'#B8965A',animation:'pulse 1.2s ease-in-out 0.4s infinite'}}></div>
+          <div style={{width:8,height:8,borderRadius:'50%',background:'#B8965A',animation:'pulse 1.2s ease-in-out 0.8s infinite'}}></div>
+        </div>
+        <style>{`@keyframes pulse{0%,100%{opacity:0.2}50%{opacity:1}}`}</style>
+        <p style={{color:'#555',fontSize:11,cursor:'pointer'}}
+           onClick={() => window.history.replaceState({}, document.title, window.location.pathname + window.location.search) || window.location.reload()}>
+          Si no se abre nada, haz clic aqui para recargar
+        </p>
+      </div>
+    </div>
+  )
+
+  // Sin token: pantalla normal de login
+  return (
     <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"-apple-system,sans-serif"}}>
       <div style={{background:'#111',border:'1px solid #222',borderRadius:16,padding:'48px 40px',maxWidth:400,width:'100%',textAlign:'center'}}>
         <p style={{color:'#C8A46A',fontSize:22,fontWeight:700,marginBottom:8}}>The Blind Concept</p>
@@ -82,19 +118,6 @@ function Root() {
       </div>
     </div>
   )
-
-  const roles = getUserRoles()
-  const hasTBC = roles.includes('tbc') || roles.includes('ambos')
-  const hasVivendi = roles.includes('vivendi') || roles.includes('ambos')
-  let defaultEmpresa = ''
-  if (hasTBC && !hasVivendi) defaultEmpresa = 'TBC'
-  if (hasVivendi && !hasTBC) defaultEmpresa = 'VIVENDI'
-
-  return <App
-    defaultEmpresa={defaultEmpresa}
-    onlyEmpresa={hasTBC && !hasVivendi ? 'TBC' : hasVivendi && !hasTBC ? 'VIVENDI' : null}
-    onLogout={handleLogout}
-  />
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(
