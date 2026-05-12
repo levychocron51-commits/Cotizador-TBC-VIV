@@ -13,9 +13,19 @@ function getUserRoles() {
   }
 }
 
+// Detecta si la URL tiene un token de Netlify Identity
+function hasIdentityToken() {
+  return window.location.hash &&
+    (window.location.hash.includes('invite_token') ||
+     window.location.hash.includes('recovery_token') ||
+     window.location.hash.includes('confirmation_token'))
+}
+
 function Root() {
   const [user, setUser] = useState(null)
-  const [ready, setReady] = useState(false)
+  // Si hay token en la URL arrancamos en ready=true directamente
+  // para que el widget pueda montar el modal sin esperar
+  const [ready, setReady] = useState(hasIdentityToken())
 
   useEffect(() => {
     const check = setInterval(() => {
@@ -26,12 +36,15 @@ function Root() {
       ni.on('init', (u) => {
         if (u) setUser(u)
         setReady(true)
+        // Si hay token, abrir el widget inmediatamente
+        if (hasIdentityToken()) {
+          ni.open()
+        }
       })
 
       ni.on('login', (u) => {
         setUser(u)
         ni.close()
-        // Limpia hash (invite_token / recovery_token) despues del login
         window.history.replaceState({}, document.title, '/')
       })
 
@@ -43,8 +56,6 @@ function Root() {
         APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
       })
 
-      // El widget detecta #invite_token y #recovery_token automaticamente en init()
-      // y abre el modal solo. Damos 5s por si el token tarda en procesarse.
       setTimeout(() => setReady(true), 5000)
     }, 50)
 
