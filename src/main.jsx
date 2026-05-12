@@ -21,7 +21,6 @@ function Root() {
     const check = setInterval(() => {
       if (!window.netlifyIdentity) return
       clearInterval(check)
-
       const ni = window.netlifyIdentity
 
       ni.on('init', (u) => {
@@ -32,6 +31,7 @@ function Root() {
       ni.on('login', (u) => {
         setUser(u)
         ni.close()
+        // Limpia hash (invite_token / recovery_token) despues del login
         window.history.replaceState({}, document.title, '/')
       })
 
@@ -43,81 +43,38 @@ function Root() {
         APIUrl: "https://guileless-sopapillas-2d1948.netlify.app/.netlify/identity"
       })
 
-      setTimeout(() => {
-        setReady(true)
-      }, 3000)
-
+      // El widget detecta #invite_token y #recovery_token automaticamente en init()
+      // y abre el modal solo. Damos 5s por si el token tarda en procesarse.
+      setTimeout(() => setReady(true), 5000)
     }, 50)
 
     return () => clearInterval(check)
   }, [])
 
-  function handleLogin() {
-    window.netlifyIdentity.open('login')
-  }
+  function handleLogin() { window.netlifyIdentity.open('login') }
+  function handleLogout() { window.netlifyIdentity.logout() }
 
-  function handleLogout() {
-    window.netlifyIdentity.logout()
-  }
+  if (!ready) return (
+    <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center'}}>
+      <div style={{color:'#C8A46A',fontSize:14}}>Cargando...</div>
+    </div>
+  )
 
-  if (!ready) {
-    return (
-      <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center'}}>
-        <div style={{color:'#C8A46A',fontSize:14}}>Cargando...</div>
+  if (!user) return (
+    <div style={{minHeight:'100vh',background:'#0A0A0A',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"-apple-system,sans-serif"}}>
+      <div style={{background:'#111',border:'1px solid #222',borderRadius:16,padding:'48px 40px',maxWidth:400,width:'100%',textAlign:'center'}}>
+        <p style={{color:'#C8A46A',fontSize:22,fontWeight:700,marginBottom:8}}>The Blind Concept</p>
+        <p style={{color:'#666',fontSize:13,marginBottom:32}}>Acceso exclusivo para colaboradores</p>
+        <button onClick={handleLogin} style={{width:'100%',padding:'14px 24px',background:'#B8965A',border:'none',borderRadius:12,color:'#fff',fontSize:15,fontWeight:700,cursor:'pointer'}}>
+          Iniciar Sesion
+        </button>
       </div>
-    )
-  }
-
-  if (!user) {
-    return (
-      <div style={{
-        minHeight:'100vh',
-        background:'#0A0A0A',
-        display:'flex',
-        alignItems:'center',
-        justifyContent:'center',
-        fontFamily:"-apple-system,'SF Pro Display','Helvetica Neue',Arial,sans-serif"
-      }}>
-        <div style={{
-          background:'#111',
-          border:'1px solid #222',
-          borderRadius:16,
-          padding:'48px 40px',
-          maxWidth:400,
-          width:'100%',
-          textAlign:'center'
-        }}>
-          <p style={{color:'#C8A46A',fontSize:22,fontWeight:700,marginBottom:8}}>
-            The Blind Concept
-          </p>
-          <p style={{color:'#666',fontSize:13,marginBottom:32}}>
-            Acceso exclusivo para colaboradores
-          </p>
-          <button
-            onClick={handleLogin}
-            style={{
-              width:'100%',
-              padding:'14px 24px',
-              background:'#B8965A',
-              border:'none',
-              borderRadius:12,
-              color:'#fff',
-              fontSize:15,
-              fontWeight:700,
-              cursor:'pointer'
-            }}
-          >
-            Iniciar Sesión
-          </button>
-        </div>
-      </div>
-    )
-  }
+    </div>
+  )
 
   const roles = getUserRoles()
   const hasTBC = roles.includes('tbc') || roles.includes('ambos')
   const hasVivendi = roles.includes('vivendi') || roles.includes('ambos')
-
   let defaultEmpresa = ''
   if (hasTBC && !hasVivendi) defaultEmpresa = 'TBC'
   if (hasVivendi && !hasTBC) defaultEmpresa = 'VIVENDI'
@@ -130,7 +87,5 @@ function Root() {
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <Root />
-  </React.StrictMode>
+  <React.StrictMode><Root /></React.StrictMode>
 )
