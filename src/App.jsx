@@ -1,5 +1,83 @@
 import React, { useState, useCallback } from "react";
 
+// ─── ESTADO PERSISTENTE EN PDF (texto oculto) ───────────────────────────────
+const COTBC_PREFIX = "COTBC1:";
+const COTBC_SUFFIX = ":COTBCEND";
+
+function loadScript(src, globalName) {
+  return new Promise(function(resolve, reject) {
+    if (window[globalName]) { resolve(); return; }
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = function() { resolve(); };
+    s.onerror = function() { reject(new Error("No se pudo cargar: " + src)); };
+    document.head.appendChild(s);
+  });
+}
+
+async function compressState(state) {
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js", "LZString");
+  const json = JSON.stringify(state);
+  const arr = window.LZString.compressToUint8Array(json);
+  let hex = "";
+  for (let i = 0; i < arr.length; i++) { hex += arr[i].toString(16).padStart(2, "0"); }
+  return COTBC_PREFIX + hex + COTBC_SUFFIX;
+}
+
+async function decompressState(blob) {
+  if (!blob) return null;
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js", "LZString");
+  function tryDecode(hexStr) {
+    let inner = hexStr.toLowerCase().replace(/[^0-9a-f]/g, "");
+    if (inner.length % 2 !== 0) inner = inner.slice(0, inner.length - 1);
+    if (inner.length < 4) return null;
+    try {
+      const bytes = new Uint8Array(inner.length / 2);
+      for (let i = 0; i < bytes.length; i++) { bytes[i] = parseInt(inner.substr(i * 2, 2), 16); }
+      const json = window.LZString.decompressFromUint8Array(bytes);
+      if (!json) return null;
+      return JSON.parse(json);
+    } catch(e) { return null; }
+  }
+  try {
+    let inner = blob;
+    if (inner.indexOf(COTBC_PREFIX) !== -1) inner = inner.slice(inner.indexOf(COTBC_PREFIX) + COTBC_PREFIX.length);
+    if (inner.indexOf(COTBC_SUFFIX) !== -1) inner = inner.slice(0, inner.indexOf(COTBC_SUFFIX));
+    // Intento principal: todo el hex junto
+    const r1 = tryDecode(inner);
+    if (r1) return r1;
+    return null;
+  } catch(e) { return null; }
+}
+
+// Lee TODO el texto de un PDF y extrae el bloque de estado comprimido
+async function readStateFromPDF(file) {
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js", "pdfjsLib");
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let fullText = "";
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    content.items.forEach(function(it){
+      const s = it.str || "";
+      // Descartar items que son basura del pie de página agregada por el visor
+      if (s.indexOf("data:text/html") !== -1) return;
+      if (s.indexOf("Cotizacion_TBC") !== -1) return;
+      if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s.trim())) return; // fecha tipo 15/6/26
+      if (/^\d{1,2}:\d{2}/.test(s.trim())) return; // hora tipo 11:11
+      if (/^\d+\/\d+$/.test(s.trim())) return; // número de página tipo 2/3
+      fullText += s;
+    });
+  }
+  const start = fullText.indexOf(COTBC_PREFIX);
+  const end = fullText.indexOf(COTBC_SUFFIX);
+  if (start === -1 || end === -1 || end < start) return null;
+  return fullText.slice(start, end + COTBC_SUFFIX.length);
+}
+
 const PRODUCT_IMAGES = {
   "PREMIUM SCREEN": "https://res.cloudinary.com/dthqt2tph/image/upload/per_9_xxvk5q",
   "LUXURY ROLLERS": "https://res.cloudinary.com/dthqt2tph/image/upload/per_4_es6i7a",
@@ -9,7 +87,8 @@ const PRODUCT_IMAGES = {
   "SHANGRI-LA": "https://res.cloudinary.com/dthqt2tph/image/upload/shangri_la_zxnh8j",
   "CORTINA_BLACKOUT": "https://res.cloudinary.com/dthqt2tph/image/upload/BLACKOOUT_2_zdskjz",
   "CORTINA_VELO": "https://res.cloudinary.com/dthqt2tph/image/upload/cor_5_kbaq0t",
-  "ANDAMIO": "https://res.cloudinary.com/dthqt2tph/image/upload/andamio_jmyx2g",
+  "TOLDO VERTICAL": "https://res.cloudinary.com/dthqt2tph/image/upload/toldo_Vertical_nqlopg",
+  "PÉRGOLA BRAZO EXTENSIBLE": "https://res.cloudinary.com/dthqt2tph/image/upload/pergola_brazo_extensible_txvxek",
   "CENEFA_CASETTE": "https://res.cloudinary.com/dthqt2tph/image/upload/cenefa_cassette_rvu03p",
   "CENEFA_PVC": "https://res.cloudinary.com/dthqt2tph/image/upload/cenefa_pcv_ukrtew",
   "CONTROL_TBC": "https://res.cloudinary.com/dthqt2tph/image/upload/control_tbc_f2qh7i",
@@ -30,6 +109,10 @@ const TABLES = {
 function getProductImage(p, telas) {
   if (p.tipoProducto === "PERSIANA") {
     return PRODUCT_IMAGES[p.tipoPersiana] || null;
+  } else if (p.tipoProducto === "TOLDO VERTICAL") {
+    return PRODUCT_IMAGES["TOLDO VERTICAL"] || null;
+  } else if (p.tipoProducto === "PÉRGOLA BRAZO EXTENSIBLE") {
+    return PRODUCT_IMAGES["PÉRGOLA BRAZO EXTENSIBLE"] || null;
   } else {
     const tela = telas ? telas.find(function(t){ return t.id === p.telaId; }) : null;
     if (!tela) return null;
@@ -144,9 +227,9 @@ function calcToldoTotal(p) {
   const instBase = motorizado ? INST_TOLDO_MOTOR : INST_TOLDO_MANUAL;
   const instPrecio = p.incluyeInstalacion ? (p.instalacionPrecio??instBase) : 0;
   const motores = p.tipoProducto==="TOLDO VERTICAL" ? MOTORES_TOLDO : MOTORES_PERGOLA;
-  const motorObj = motores.find(function(m){return m.id===p.motorId;});
+  const motorObj = [...motores,...(p._motoresCustom||[])].find(function(m){return m.id===p.motorId;});
   const motorPrecio = motorObj?.precio||0;
-  const controlObj = CONTROLES_TOLDO.find(function(ct){return ct.id===p.controlId;});
+  const controlObj = [...CONTROLES_TOLDO,...(p._controlesCustom||[])].find(function(ct){return ct.id===p.controlId;});
   const controlPrecio = controlObj?.precio||0;
   const cantidad = parseInt(p.cantidad)||1;
   const subtotal = ajustado+instPrecio+motorPrecio+controlPrecio;
@@ -226,15 +309,25 @@ const fmt=(n)=>`$${Number(n||0).toFixed(2)}`;
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2);
 const extrasTotal=(extras)=>(extras||[]).reduce((s,e)=>s+(parseFloat(e.precio)||0)*(e.isML?(parseFloat(e.metros)||0):(parseInt(e.cantidad)||1)),0);
 
+// Inyecta keyframe de pulso global una sola vez
+(function injectPulseStyle(){
+  if(document.getElementById("tbc-pulse-style"))return;
+  const el=document.createElement("style");
+  el.id="tbc-pulse-style";
+  el.textContent="@keyframes tbcPulse{0%,100%{box-shadow:0 0 0 0 rgba(184,150,90,0.6);}50%{box-shadow:0 0 0 7px rgba(184,150,90,0);}}";
+  document.head.appendChild(el);
+})();
+
 // ─── CALC FUNCTIONS ────────────────────────────────────────────────────────────
-function calcCortinaTotal(p,telas,confecciones){
+function calcCortinaTotal(p,telas,confecciones,rielesCustom){
   const conf=confecciones.find(c=>c.id===p.confeccionId);
   const divisor=conf?.divisor||20;
   const anchoIn=(p.ancho||0)*0.3937,altoIn=(p.alto||0)*0.3937;
   const panos=Math.ceil((anchoIn+(p.dosVias?10:0))/divisor);
   const yardasDobles=Math.ceil(Math.ceil(panos*((altoIn+12)/36))/2);
   const telaObj=telas.find(t=>t.id===p.telaId);
-  const rielObj=RIELES.find(r=>r.id===p.rielId);
+  const todosRieles=[...RIELES,...(rielesCustom||[])];
+  const rielObj=todosRieles.find(r=>r.id===p.rielId);
   const rielPrecio=rielObj?(rielObj.unidad==="Metro Lineal"?rielObj.precio*((p.ancho||0)/100):rielObj.precio):0;
   const altoDoble=(p.alto||0)>350,motorizado=p.tipoAccionamiento==="MOTORIZADA";
   const instBase=altoDoble?(motorizado?INST_CORTINA_MOTOR_DBL:INST_CORTINA_MANUAL_DBL):(motorizado?INST_CORTINA_MOTOR:INST_CORTINA_MANUAL);
@@ -246,7 +339,7 @@ function calcCortinaTotal(p,telas,confecciones){
   const confeccionPrecio=confeccionPrecioUnit*panos;
   const telaPrecio=(telaObj?.precio||0)*yardasDobles;
   const vapPrecio=p.vaporizacion?16:0,bastaPrecio=p.basta?60:0;
-  const controlObj=CORTINA_CONTROLES.find(c=>c.id===p.controlId);
+  const controlObj=[...CORTINA_CONTROLES,...(p._controlesCustom||[])].find(c=>c.id===p.controlId);
   const controlPrecio=controlObj?.precio||0;
   const andamioPrecio=p.andamio?150:0;
   const total=confeccionPrecio+telaPrecio+rielPrecio+instPrecio+vapPrecio+bastaPrecio+controlPrecio+andamioPrecio;
@@ -270,14 +363,17 @@ function calcPersianaTotal(p){
   const altoDoble=p.alto>350,motorizado=p.tipoAccionamiento==="MOTORIZADA";
   const instBase=altoDoble?(motorizado?INST_ROLLER_MOTOR_DBL:INST_ROLLER_MANUAL_DBL):(motorizado?INST_ROLLER_MOTOR:INST_ROLLER_MANUAL);
   const instPrecio=p.incluyeInstalacion?(p.instalacionPrecio??instBase):0;
-  const motorObj=MOTORES.find(m=>m.id===p.motorId),motorPrecio=motorObj?.precio||0;
-  const controlObj=PERSIANA_CONTROLES.find(c=>c.id===p.controlId),controlPrecio=controlObj?.precio||0;
-  const cenefaObj=CENEFAS.find(c=>c.id===p.cenefaId);
-  const cenefaML=p.cenefa?(p.ancho/100):0;
+  const motorObj=[...MOTORES,...(p._motoresCustom||[])].find(m=>m.id===p.motorId),motorPrecio=motorObj?.precio||0;
+  const controlObj=[...PERSIANA_CONTROLES,...(p._controlesCustom||[])].find(c=>c.id===p.controlId),controlPrecio=controlObj?.precio||0;
+  const cenefaObj=[...CENEFAS,...(p._cenefasCustom||[])].find(c=>c.id===p.cenefaId);
+  const cenefaMLcalc=p.ancho/100;
+  const cenefaML=p.cenefa?(p.cenefaMLManual===null||p.cenefaMLManual===undefined?cenefaMLcalc:(p.cenefaMLManual===""?0:parseFloat(p.cenefaMLManual)||0)):0;
   const cenefaPrecio=p.cenefa&&cenefaObj?cenefaML*cenefaObj.precio:0;
   const instCenefaPrecio=p.cenefa?(p.instCenefaPrecio??INST_CENEFA):0;
-  const perfilesML=p.perfiles?((p.alto/100)*2):0;
-  const perfilesPrecio=p.perfiles?perfilesML*30:0;
+  const perfilesMLcalc=(p.alto/100)*2;
+  const perfilesML=p.perfiles?(p.perfilesMLManual===null||p.perfilesMLManual===undefined?perfilesMLcalc:(p.perfilesMLManual===""?0:parseFloat(p.perfilesMLManual)||0)):0;
+  const perfilPrecioUnit=p.perfilPrecioUnit===null||p.perfilPrecioUnit===undefined?30:(p.perfilPrecioUnit===""?0:parseFloat(p.perfilPrecioUnit)||0);
+  const perfilesPrecio=p.perfiles?perfilesML*perfilPrecioUnit:0;
   const instPerfilesPrecio=p.perfiles?(p.instPerfilesPrecio??INST_PERFILES):0;
   const cantidad=parseInt(p.cantidad)||1;
   const subtotal=ajustado+instPrecio+motorPrecio+controlPrecio+cenefaPrecio+instCenefaPrecio+perfilesPrecio+instPerfilesPrecio;
@@ -353,7 +449,7 @@ function calcOtroTotal(p) {
 }
 
 // Description builder for PDF
-function buildDesc(p,telas,confecciones){
+function buildDesc(p,telas,confecciones,rielesCustom){
   const parts=[];
   if(p.tipoProducto==="PERSIANA"){
     if(p.tipoPersiana)parts.push(p.tipoPersiana);
@@ -387,21 +483,28 @@ function buildDesc(p,telas,confecciones){
       parts.push("CORTINA "+telaName.toUpperCase());
     }
     if(conf)parts.push("CONFECCIÓN "+conf.nombre);
-    const riel=RIELES.find(r=>r.id===p.rielId);
+    const riel=[...RIELES,...(rielesCustom||[])].find(r=>r.id===p.rielId);
     if(riel){
       const rielName=riel.nombre.replace(/^Riel\s+/i,"");
       parts.push("RIEL "+rielName.toUpperCase());
     }
     if(p.vaporizacion)parts.push("VAPORIZACIÓN Y PLANCHADO");
     if(p.basta)parts.push("BASTA");
+    if(p.dosVias===true)parts.push("2 VÍAS");
+    else if(p.dosVias===false)parts.push("1 VÍA");
+    if(p.andamio)parts.push("ANDAMIO");
+    if(p.tipoAccionamiento==="MOTORIZADA"&&p.controlId){
+      const ctrl=[...CORTINA_CONTROLES,...(p._controlesCustom||[])].find(function(x){return x.id===p.controlId;});
+      if(ctrl)parts.push("CONTROL "+ctrl.nombre.replace(/^Control\s+/i,"").toUpperCase());
+    }
   }
   if(p.tipoProducto==="TOLDO VERTICAL"||p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE"){
     const parts2=[p.tipoProducto];
     if(p.tipoAccionamiento==="MOTORIZADA"){
       const motores=p.tipoProducto==="TOLDO VERTICAL"?MOTORES_TOLDO:MOTORES_PERGOLA;
-      const m=motores.find(function(x){return x.id===p.motorId;});
+      const m=[...motores,...(p._motoresCustom||[])].find(function(x){return x.id===p.motorId;});
       if(m)parts2.push(m.nombre.toUpperCase());
-      const ctrl=CONTROLES_TOLDO.find(function(x){return x.id===p.controlId;});
+      const ctrl=[...CONTROLES_TOLDO,...(p._controlesCustom||[])].find(function(x){return x.id===p.controlId;});
       if(ctrl)parts2.push(ctrl.nombre.toUpperCase());
     }
     return parts2.join(" + ");
@@ -429,6 +532,7 @@ function validatePiece(p, telas) {
   } else if (p.tipoProducto === "CORTINA DE TELA") {
     if (!p.ancho) errors.ancho = "Ingresa el ancho";
     if (!p.alto) errors.alto = "Ingresa el alto";
+    if (!p.tipoAccionamiento) errors.tipoAccionamiento = "Selecciona accionamiento";
     if (!p.telaId || !allTelas.find(function(t){return t.id===p.telaId;})) errors.telaId = "Selecciona o agrega una tela";
     if (!p.confeccionId) errors.confeccionId = "Selecciona el tipo de confección";
     if (!p.rielId) errors.rielId = "Selecciona un riel";
@@ -467,8 +571,8 @@ function isPieceValid(p, telas) {
 const newPiece=()=>({
   id:uid(),tipoProducto:"PERSIANA",area:"",ancho:"",alto:"",cantidad:1,
   tipoPersiana:"",mult:null,precioAjustadoManual:null,tipoAccionamiento:"MANUAL",ladoCadena:"DERECHO",enrollado:"DELANTERO",
-  motorId:"",controlId:"",cenefa:false,cenefaId:"",cenefaML:null,instCenefaPrecio:null,
-  perfiles:false,perfilesML:null,instPerfilesPrecio:null,instalacionPrecio:null,incluyeInstalacion:true,
+  motorId:"",controlId:"",cenefa:false,cenefaId:"",cenefaML:null,cenefaMLManual:null,instCenefaPrecio:null,
+  perfiles:false,perfilesML:null,perfilesMLManual:null,perfilPrecioUnit:null,instPerfilesPrecio:null,instalacionPrecio:null,incluyeInstalacion:true,
   extras:[],telaId:"",confeccionId:"",rielId:"",dosVias:true,vaporizacion:false,basta:false,andamio:false,confeccionPrecioUnit:null,
   // Papel de pared
   papelModo:"ROLLO",papelParedes:[{id:"pw1",nombre:"",ancho:"",alto:""}],
@@ -517,44 +621,56 @@ function ExtraRow({e,onUpdate,onRemove,isML}){
   );
 }
 
-function AddExtraRow({catalog,isML,onAdd}){
+function AddExtraRow({catalog,isML,onAdd,onPendingChange}){
   const[mode,setMode]=useState("cat");
   const[catId,setCatId]=useState("");
   const[nombre,setNombre]=useState("");
   const[precio,setPrecio]=useState("");
+  function notifyPending(newCatId,newNombre,newPrecio,newMode){
+    const m=newMode!==undefined?newMode:mode;
+    const pending=m==="cat"?(newCatId!==undefined?newCatId:catId)!=="":((newNombre!==undefined?newNombre:nombre)!=="")||(newPrecio!==undefined?newPrecio:precio)!=="";
+    if(onPendingChange)onPendingChange(pending);
+  }
   function handleAdd(){
-    if(mode==="cat"){if(!catId)return;const cat=catalog.find(function(c){return c.id===catId;});if(!cat)return;const item={id:uid(),nombre:cat.nombre,precio:cat.precio};if(isML){item.metros=1;}else{item.cantidad=1;}onAdd(item);setCatId("");}
-    else{if(!nombre||!precio)return;const item={id:uid(),nombre:nombre,precio:parseFloat(precio)||0,custom:true};if(isML){item.metros=1;}else{item.cantidad=1;}onAdd(item);setNombre("");setPrecio("");}
+    if(mode==="cat"){if(!catId)return;const cat=catalog.find(function(c){return c.id===catId;});if(!cat)return;const item={id:uid(),nombre:cat.nombre,precio:cat.precio};if(isML){item.metros=1;}else{item.cantidad=1;}onAdd(item);setCatId("");if(onPendingChange)onPendingChange(false);}
+    else{if(!nombre||!precio)return;const item={id:uid(),nombre:nombre,precio:parseFloat(precio)||0,custom:true};if(isML){item.metros=1;}else{item.cantidad=1;}onAdd(item);setNombre("");setPrecio("");if(onPendingChange)onPendingChange(false);}
   }
   return(
     <div style={{background:"rgba(201,168,76,.04)",border:`1px dashed ${C.border}`,borderRadius:8,padding:"10px 12px",marginTop:6}}>
       <div style={{display:"flex",gap:7,marginBottom:8}}>
-        <div style={{...S.radio(mode==="cat"),cursor:"pointer",fontSize:11}} onClick={function(){setMode("cat");}}>Del catálogo</div>
-        <div style={{...S.radio(mode==="custom"),cursor:"pointer",fontSize:11}} onClick={function(){setMode("custom");}}>Personalizado</div>
+        <div style={{...S.radio(mode==="cat"),cursor:"pointer",fontSize:11}} onClick={function(){setMode("cat");notifyPending(catId,nombre,precio,"cat");}}>Del catálogo</div>
+        <div style={{...S.radio(mode==="custom"),cursor:"pointer",fontSize:11}} onClick={function(){setMode("custom");notifyPending(catId,nombre,precio,"custom");}}>Personalizado</div>
       </div>
       {mode==="cat"?(
-        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <select style={{...S.sel,flex:1,minWidth:180}} value={catId} onChange={function(e){setCatId(e.target.value);}}>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+          <select style={{...S.sel,flex:1,minWidth:180}} value={catId} onChange={function(e){setCatId(e.target.value);notifyPending(e.target.value,nombre,precio);}}>
             <option value="">Seleccionar...</option>
             {catalog.map(function(c){return <option key={c.id} value={c.id}>{c.nombre} — {fmt(c.precio)}{isML?"/ml":""}</option>;})}
           </select>
-          <div style={{...S.radio(true),cursor:"pointer",padding:"7px 16px"}} onClick={handleAdd}>+ Agregar</div>
+          <div style={{...S.radio(true),cursor:"pointer",padding:"7px 16px",
+            ...(catId?{background:"rgba(184,150,90,.25)",borderColor:C.gold,color:C.goldL,animation:"tbcPulse 1.4s ease-in-out infinite",fontWeight:800}:{})
+          }} onClick={handleAdd}>{catId?"⚠ Confirmar agregar":"+ Agregar"}</div>
         </div>
       ):(
-        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <input style={{...S.inp,flex:2,minWidth:130}} placeholder="Nombre" value={nombre} onChange={function(e){setNombre(e.target.value);}}/>
-          <input type="number" style={{...S.inp,width:95}} placeholder={isML?"$/ml":"Precio $"} value={precio} onChange={function(e){setPrecio(e.target.value);}}/>
-          <div style={{...S.radio(true),cursor:"pointer",padding:"7px 16px"}} onClick={handleAdd}>+ Agregar</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+          <input style={{...S.inp,flex:2,minWidth:130}} placeholder="Nombre" value={nombre} onChange={function(e){setNombre(e.target.value);notifyPending(catId,e.target.value,precio);}}/>
+          <input type="number" style={{...S.inp,width:95}} placeholder={isML?"$/ml":"Precio $"} value={precio} onChange={function(e){setPrecio(e.target.value);notifyPending(catId,nombre,e.target.value);}}/>
+          <div style={{...S.radio(true),cursor:"pointer",padding:"7px 16px",
+            ...((nombre||precio)?{background:"rgba(184,150,90,.25)",borderColor:C.gold,color:C.goldL,animation:"tbcPulse 1.4s ease-in-out infinite",fontWeight:800}:{})
+          }} onClick={handleAdd}>{(nombre||precio)?"⚠ Confirmar agregar":"+ Agregar"}</div>
         </div>
       )}
     </div>
   );
 }
 
-function ExtrasSection({extras,onChange}){
+function ExtrasSection({extras,onChange,onPendingChange}){
   if(!extras)extras=[];
   const unidadItems=extras.filter(function(e){return !e.isML;});
   const mlItems=extras.filter(function(e){return e.isML;});
+  const[unidadPendiente,setUnidadPendiente]=useState(false);
+  const[mlPendiente,setMlPendiente]=useState(false);
+  function notifyUp(u,m){if(onPendingChange)onPendingChange(u||m);}
   function addUnidad(item){onChange([...extras,{...item,isML:false}]);}
   function addML(item){onChange([...extras,{...item,isML:true}]);}
   function removeExtra(id){onChange(extras.filter(function(e){return e.id!==id;}));}
@@ -566,12 +682,12 @@ function ExtrasSection({extras,onChange}){
       <div style={SS}>
         <div style={{...S.lbl,marginBottom:10,color:"#88aaff"}}>🔧 Por Unidad</div>
         {unidadItems.map(function(e){return(<ExtraRow key={e.id} e={e} isML={false} onUpdate={function(k,v){updateExtra(e.id,k,v);}} onRemove={function(){removeExtra(e.id);}}/>);})}
-        <AddExtraRow catalog={EXTRAS_UNIDAD} isML={false} onAdd={addUnidad}/>
+        <AddExtraRow catalog={EXTRAS_UNIDAD} isML={false} onAdd={addUnidad} onPendingChange={function(p){setUnidadPendiente(p);notifyUp(p,mlPendiente);}}/>
       </div>
       <div style={SS}>
         <div style={{...S.lbl,marginBottom:10,color:"#88cc99"}}>📏 Por Metro Lineal</div>
         {mlItems.map(function(e){return(<ExtraRow key={e.id} e={e} isML={true} onUpdate={function(k,v){updateExtra(e.id,k,v);}} onRemove={function(){removeExtra(e.id);}}/>);})}
-        <AddExtraRow catalog={EXTRAS_ML} isML={true} onAdd={addML}/>
+        <AddExtraRow catalog={EXTRAS_ML} isML={true} onAdd={addML} onPendingChange={function(p){setMlPendiente(p);notifyUp(unidadPendiente,p);}}/>
       </div>
     </div>
   );
@@ -587,8 +703,41 @@ function ExtrasRows({extras}){
   });
 }
 
+// ─── COMPONENTE REUTILIZABLE: AGREGAR ITEM PERSONALIZADO (motor/control/cenefa) ──
+function CustomItemAdder({label,onAdd,unidad,onPendingChange}){
+  const[adding,setAdding]=useState(false);
+  const[nombre,setNombre]=useState("");
+  const[precio,setPrecio]=useState("");
+  const pending=adding&&(nombre!==""||precio!=="");
+  React.useEffect(function(){
+    if(onPendingChange)onPendingChange(pending);
+    return function(){if(onPendingChange)onPendingChange(false);};
+  },[pending]);
+  function handleAdd(){
+    if(!nombre||precio==="")return;
+    onAdd({id:uid(),nombre:nombre,precio:parseFloat(precio)||0,custom:true});
+    setNombre("");setPrecio("");setAdding(false);
+    if(onPendingChange)onPendingChange(false);
+  }
+  if(!adding)return <div style={{...S.addBtn,marginTop:8}} onClick={function(){setAdding(true);}}>+ {label}</div>;
+  const addBtnStyle=pending?{...S.radio(true),cursor:"pointer",background:"rgba(184,150,90,.25)",borderColor:C.gold,color:C.goldL,animation:"tbcPulse 1.4s ease-in-out infinite",fontWeight:800}:{...S.radio(true),cursor:"pointer"};
+  return(
+    <div style={{...S.card,marginTop:8,padding:"14px 18px"}}>
+      <div style={{...S.lbl,marginBottom:10,color:C.goldL}}>{label}</div>
+      <div style={{...S.g2,marginBottom:10}}>
+        <div style={S.field}><div style={S.lbl}>Nombre</div><input style={S.inp} value={nombre} onChange={function(e){setNombre(e.target.value);}} placeholder="ej. Modelo especial"/></div>
+        <div style={S.field}><div style={S.lbl}>Precio ($){unidad?" / "+unidad:""}</div><input type="number" step="0.01" style={S.inp} value={precio} onChange={function(e){setPrecio(e.target.value);}} placeholder="0.00"/></div>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <div style={addBtnStyle} onClick={handleAdd}>{pending?"⚠ Confirmar agregar":"✓ Agregar"}</div>
+        <div style={{...S.radio(false),cursor:"pointer"}} onClick={function(){setAdding(false);setNombre("");setPrecio("");if(onPendingChange)onPendingChange(false);}}>Cancelar</div>
+      </div>
+    </div>
+  );
+}
+
 // ─── PERSIANA FORM ─────────────────────────────────────────────────────────────
-function PersianaForm({p,update,errors}){
+function PersianaForm({p,update,updateMany,motoresCustom,setMotoresCustom,controlesCustom,setControlesCustom,cenefasCustom,setCenefasCustom,makePendingHandler,pieceIdx,errors}){
   if(!errors)errors={};
   const ancho=parseFloat(p.ancho)||0,alto=parseFloat(p.alto)||0;
   const altoDoble=alto>350,motorizado=p.tipoAccionamiento==="MOTORIZADA";
@@ -598,11 +747,12 @@ function PersianaForm({p,update,errors}){
   const calc=calcPersianaTotal(p);
   const defaultMult=p.tipoPersiana?(TABLES[p.tipoPersiana]?.mult||1):1;
   const multVal=p.mult??defaultMult;
-  const cenefaML = ancho ? +(ancho/100).toFixed(2) : 0;
-  const perfilesML = alto ? +(alto/100*2).toFixed(2) : 0;
   const errS={...S.inp,borderColor:"#ff6060",color:"#ff8080"};
   const isDual=p.tipoPersiana==="LUXURY DUAL CRYSTALLINE"||p.tipoPersiana==="LUXURY DUAL OPAQUE"||p.tipoPersiana==="SHANGRI-LA";
-  const motoresDisponibles=isDual?MOTORES.filter(m=>m.nombre.includes("1L")):MOTORES;
+  const motoresCatalogo=[...MOTORES,...(motoresCustom||[])];
+  const motoresDisponibles=isDual?motoresCatalogo.filter(m=>m.nombre.includes("1L")||m.custom):motoresCatalogo;
+  const controlesCatalogo=[...PERSIANA_CONTROLES,...(controlesCustom||[])];
+  const cenefasCatalogo=[...CENEFAS,...(cenefasCustom||[])];
   return(<>
     <div style={{...S.field,marginBottom:14}}>
       <div style={{...S.lbl,color:errors.tipoPersiana?"#E05555":"#ccc"}}>Tipo de Persiana {errors.tipoPersiana&&<span style={{color:"#E05555"}}>*</span>}</div>
@@ -618,7 +768,7 @@ function PersianaForm({p,update,errors}){
         <div style={{...S.lbl,color:errors.ancho?"#E05555":"#ccc"}}>Ancho (cm) {errors.ancho&&<span style={{color:"#E05555"}}>*</span>}</div>
         <input type="number" style={wErr?errS:{...S.inp,borderColor:errors.ancho?"#E05555":undefined}} placeholder="ej. 152" value={p.ancho}
           onChange={function(e){update("ancho",e.target.value===""?"":e.target.value);}}
-          onBlur={function(e){const v=parseFloat(e.target.value);update("ancho",isNaN(v)?"":v);update("cenefaML",null);update("perfilesML",null);}}/>
+          onBlur={function(e){const v=parseFloat(e.target.value);update("ancho",isNaN(v)?"":v);}}/>
         {wErr&&<div style={{fontSize:10,color:"#ff6060",marginTop:2}}>⚠ {wErr}</div>}
         {!wErr&&errors.ancho&&<div style={{fontSize:10,color:"#E05555",marginTop:2}}>⚠ {errors.ancho}</div>}
       </div>
@@ -626,7 +776,7 @@ function PersianaForm({p,update,errors}){
         <div style={{...S.lbl,color:errors.alto?"#E05555":"#ccc"}}>Alto (cm) {errors.alto&&<span style={{color:"#E05555"}}>*</span>}</div>
         <input type="number" style={hErr?errS:{...S.inp,borderColor:errors.alto?"#E05555":undefined}} placeholder="ej. 182" value={p.alto}
           onChange={function(e){update("alto",e.target.value===""?"":e.target.value);}}
-          onBlur={function(e){const v=parseFloat(e.target.value);update("alto",isNaN(v)?"":v);update("cenefaML",null);update("perfilesML",null);}}/>
+          onBlur={function(e){const v=parseFloat(e.target.value);update("alto",isNaN(v)?"":v);}}/>
         {hErr&&<div style={{fontSize:10,color:"#ff6060",marginTop:2}}>⚠ {hErr}</div>}
         {!hErr&&errors.alto&&<div style={{fontSize:10,color:"#E05555",marginTop:2}}>⚠ {errors.alto}</div>}
       </div>
@@ -663,24 +813,30 @@ function PersianaForm({p,update,errors}){
     <div style={{...S.field,marginBottom:14}}>
       <div style={S.lbl}>Accionamiento</div>
       <div style={S.radioRow}>
-        {["MANUAL","MOTORIZADA"].map(function(t){return <div key={t} style={S.radio(p.tipoAccionamiento===t)} onClick={function(){update("tipoAccionamiento",t);}}>{t}</div>;})}
+        {["MANUAL","MOTORIZADA"].map(function(t){return <div key={t} style={S.radio(p.tipoAccionamiento===t)} onClick={function(){if(t==="MANUAL"){updateMany({tipoAccionamiento:"MANUAL",motorId:"",controlId:""});}else{update("tipoAccionamiento",t);}}}>{t}</div>;})}
       </div>
     </div>
     {motorizado&&(
-      <div style={{...S.g2,marginBottom:14}}>
-        <div style={S.field}>
-          <div style={S.lbl}>Motor{isDual&&<span style={{color:"#ff9944",marginLeft:6,fontSize:10}}>Solo 1L</span>}</div>
-          <select style={S.sel} value={p.motorId} onChange={function(e){update("motorId",e.target.value);}}>
-            <option value="">Sin motor</option>
-            {motoresDisponibles.map(function(m){return <option key={m.id} value={m.id}>{m.nombre} — {fmt(m.precio)}</option>;})}
-          </select>
+      <div style={{marginBottom:14}}>
+        <div style={S.g2}>
+          <div style={S.field}>
+            <div style={S.lbl}>Motor{isDual&&<span style={{color:"#ff9944",marginLeft:6,fontSize:10}}>Solo 1L</span>}</div>
+            <select style={S.sel} value={p.motorId} onChange={function(e){update("motorId",e.target.value);}}>
+              <option value="">Sin motor</option>
+              {motoresDisponibles.map(function(m){return <option key={m.id} value={m.id}>{m.nombre} — {fmt(m.precio)}</option>;})}
+            </select>
+          </div>
+          <div style={S.field}>
+            <div style={S.lbl}>Control Remoto</div>
+            <select style={S.sel} value={p.controlId} onChange={function(e){update("controlId",e.target.value);}}>
+              <option value="">Sin control</option>
+              {controlesCatalogo.map(function(c){return <option key={c.id} value={c.id}>{c.nombre} — {fmt(c.precio)}</option>;})}
+            </select>
+          </div>
         </div>
-        <div style={S.field}>
-          <div style={S.lbl}>Control Remoto</div>
-          <select style={S.sel} value={p.controlId} onChange={function(e){update("controlId",e.target.value);}}>
-            <option value="">Sin control</option>
-            {PERSIANA_CONTROLES.map(function(c){return <option key={c.id} value={c.id}>{c.nombre} — {fmt(c.precio)}</option>;})}
-          </select>
+        <div style={S.g2}>
+          <CustomItemAdder label="Agregar motor personalizado" onAdd={function(item){setMotoresCustom(function(prev){return[...prev,item];});update("motorId",item.id);}} onPendingChange={makePendingHandler?makePendingHandler("p"+pieceIdx+"-pers-motor"):undefined}/>
+          <CustomItemAdder label="Agregar control personalizado" onAdd={function(item){setControlesCustom(function(prev){return[...prev,item];});update("controlId",item.id);}} onPendingChange={makePendingHandler?makePendingHandler("p"+pieceIdx+"-pers-control"):undefined}/>
         </div>
       </div>
     )}
@@ -698,21 +854,22 @@ function PersianaForm({p,update,errors}){
           <div style={S.radio(p.cenefa===true)} onClick={function(){update("cenefa",true);}}>SÍ</div>
           <div style={S.radio(p.cenefa===false)} onClick={function(){update("cenefa",false);}}>NO</div>
         </div>
-        {p.cenefa&&(
+        {p.cenefa&&(<>
           <div style={{...S.g3,marginTop:12}}>
             <div style={S.field}>
               <div style={{...S.lbl,color:errors.cenefaId?"#E05555":"#ccc"}}>Tipo de Cenefa {errors.cenefaId&&<span style={{color:"#E05555"}}>*</span>}</div>
               <select style={{...S.sel,borderColor:errors.cenefaId?"#E05555":undefined}} value={p.cenefaId} onChange={function(e){update("cenefaId",e.target.value);}}>
                 <option value="">Seleccionar...</option>
-                {CENEFAS.map(function(c){return <option key={c.id} value={c.id}>{c.nombre} — {fmt(c.precio)}/ml</option>;})}
+                {cenefasCatalogo.map(function(c){return <option key={c.id} value={c.id}>{c.nombre} — {fmt(c.precio)}/ml</option>;})}
               </select>
               {errors.cenefaId&&<div style={{fontSize:10,color:"#E05555",marginTop:2}}>⚠ {errors.cenefaId}</div>}
             </div>
             <div style={S.field}>
-              <div style={S.lbl}>Metros Lineales</div>
-              <input type="number" step="0.01" style={S.inp} value={cenefaML}
-                onChange={function(e){update("cenefaML",e.target.value===""?"":parseFloat(e.target.value)||0);}}
-                readOnly/>
+              <div style={S.lbl}>Metros Lineales (editable)</div>
+              <input type="number" step="0.01" style={S.inp}
+                value={p.cenefaMLManual!==null&&p.cenefaMLManual!==undefined?p.cenefaMLManual:(+(ancho/100).toFixed(2))}
+                onChange={function(e){update("cenefaMLManual",e.target.value);}}
+                onBlur={function(e){if(e.target.value===""){update("cenefaMLManual",null);}else{const v=parseFloat(e.target.value);update("cenefaMLManual",isNaN(v)?null:v);}}}/>
               <div style={S.tip}>Auto: {ancho}cm÷100={+(ancho/100).toFixed(2)}ml</div>
             </div>
             <div style={S.field}>
@@ -722,7 +879,8 @@ function PersianaForm({p,update,errors}){
                 onBlur={function(e){const v=parseFloat(e.target.value);update("instCenefaPrecio",isNaN(v)?INST_CENEFA:v);}}/>
             </div>
           </div>
-        )}
+          <CustomItemAdder label="Agregar tipo de cenefa personalizada" unidad="ml" onAdd={function(item){setCenefasCustom(function(prev){return[...prev,item];});update("cenefaId",item.id);}} onPendingChange={makePendingHandler?makePendingHandler("p"+pieceIdx+"-pers-cenefa"):undefined}/>
+        </>)}
       </div>
     )}
     {!isDual&&(
@@ -734,11 +892,20 @@ function PersianaForm({p,update,errors}){
         </div>
         {p.perfiles&&(
           <div style={{...S.g3,marginTop:12}}>
-            <div style={S.field}><div style={S.lbl}>Precio Perfil</div><input style={{...S.inp,color:C.muted}} readOnly value="$30/ml"/></div>
             <div style={S.field}>
-              <div style={S.lbl}>Metros Lineales (Par)</div>
-              <input type="number" step="0.01" style={S.inp} value={perfilesML}
-                readOnly/>
+              <div style={S.lbl}>Precio Perfil ($/ml, editable)</div>
+              <input type="number" step="0.01" style={S.inp}
+                value={p.perfilPrecioUnit!==null&&p.perfilPrecioUnit!==undefined?p.perfilPrecioUnit:30}
+                onChange={function(e){update("perfilPrecioUnit",e.target.value);}}
+                onBlur={function(e){if(e.target.value===""){update("perfilPrecioUnit",null);}else{const v=parseFloat(e.target.value);update("perfilPrecioUnit",isNaN(v)?null:v);}}}/>
+              <div style={S.tip}>Pred: $30/ml</div>
+            </div>
+            <div style={S.field}>
+              <div style={S.lbl}>Metros Lineales Par (editable)</div>
+              <input type="number" step="0.01" style={S.inp}
+                value={p.perfilesMLManual!==null&&p.perfilesMLManual!==undefined?p.perfilesMLManual:(+(alto/100*2).toFixed(2))}
+                onChange={function(e){update("perfilesMLManual",e.target.value);}}
+                onBlur={function(e){if(e.target.value===""){update("perfilesMLManual",null);}else{const v=parseFloat(e.target.value);update("perfilesMLManual",isNaN(v)?null:v);}}}/>
               <div style={S.tip}>Auto: {alto}cm÷100×2={+(alto/100*2).toFixed(2)}ml</div>
             </div>
             <div style={S.field}>
@@ -790,18 +957,21 @@ function PersianaForm({p,update,errors}){
 }
 
 // ─── CORTINA FORM ──────────────────────────────────────────────────────────────
-function CortinaForm({p,update,telas,setTelas,confecciones,setConfecciones,errors}){
+function CortinaForm({p,update,updateMany,telas,setTelas,confecciones,setConfecciones,rielesCustom,setRielesCustom,controlesCustom,setControlesCustom,makePendingHandler,pieceIdx,errors}){
   if(!errors)errors={};
   const[addingTela,setAddingTela]=useState(false);
   const[newTela,setNewTela]=useState({nombre:"",precio:""});
   const[addingConf,setAddingConf]=useState(false);
   const[newConf,setNewConf]=useState({nombre:"",divisor:""});
+  const[addingRiel,setAddingRiel]=useState(false);
+  const[newRiel,setNewRiel]=useState({nombre:"",precio:""});
   const altoDoble=(p.alto||0)>350,motorizado=p.tipoAccionamiento==="MOTORIZADA";
   const instBase=altoDoble?(motorizado?INST_CORTINA_MOTOR_DBL:INST_CORTINA_MANUAL_DBL):(motorizado?INST_CORTINA_MOTOR:INST_CORTINA_MANUAL);
   const confPrecioBase=altoDoble?48:24;
-  const calc=(p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto)?calcCortinaTotal(p,telas,confecciones):null;
+  const calc=(p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto)?calcCortinaTotal(p,telas,confecciones,rielesCustom||[]):null;
   function addTela(){if(!newTela.nombre||!newTela.precio)return;const t={id:uid(),nombre:newTela.nombre,precio:parseFloat(newTela.precio),unidad:"Yarda Doble"};setTelas(function(prev){return[...prev,t];});update("telaId",t.id);setNewTela({nombre:"",precio:""});setAddingTela(false);}
   function addConf(){if(!newConf.nombre||!newConf.divisor)return;const c={id:uid(),nombre:newConf.nombre,divisor:parseInt(newConf.divisor)};setConfecciones(function(prev){return[...prev,c];});update("confeccionId",c.id);setNewConf({nombre:"",divisor:""});setAddingConf(false);}
+  function addRiel(){if(!newRiel.nombre||!newRiel.precio)return;const r={id:uid(),nombre:newRiel.nombre,precio:parseFloat(newRiel.precio),unidad:"Metro Lineal",custom:true};setRielesCustom(function(prev){return[...prev,r];});update("rielId",r.id);setNewRiel({nombre:"",precio:""});setAddingRiel(false);}
   return(<>
     <div style={{...S.g3,marginBottom:14}}>
       <div style={S.field}>
@@ -820,6 +990,14 @@ function CortinaForm({p,update,telas,setTelas,confecciones,setConfecciones,error
           onChange={function(e){update("cantidad",e.target.value===""?"":e.target.value);}}
           onBlur={function(e){const v=parseInt(e.target.value);update("cantidad",isNaN(v)||v<1?1:v);}}/>
       </div>
+    </div>
+    <div style={{...S.field,marginBottom:14}}>
+      <div style={{...S.lbl,color:errors.tipoAccionamiento?"#E05555":"#ccc"}}>Accionamiento {errors.tipoAccionamiento&&<span style={{color:"#E05555"}}>*</span>}</div>
+      <div style={S.radioRow}>
+        <div style={{...S.radio(p.tipoAccionamiento==="MANUAL"),borderColor:errors.tipoAccionamiento?"#E05555":undefined}} onClick={function(){const rielMotorizado=p.rielId&&RIELES.find(function(x){return x.id===p.rielId;})?.nombre.toLowerCase().includes("motorizado");updateMany({tipoAccionamiento:"MANUAL",motorId:"",controlId:"",rielId:rielMotorizado?"":p.rielId});}}>MANUAL</div>
+        <div style={{...S.radio(p.tipoAccionamiento==="MOTORIZADA"),borderColor:errors.tipoAccionamiento?"#E05555":undefined}} onClick={function(){const rielManual=p.rielId&&RIELES.find(function(x){return x.id===p.rielId;})&&!RIELES.find(function(x){return x.id===p.rielId;}).nombre.toLowerCase().includes("motorizado");updateMany({tipoAccionamiento:"MOTORIZADA",rielId:rielManual?"":p.rielId});}}>MOTORIZADA</div>
+      </div>
+      {errors.tipoAccionamiento&&<div style={{fontSize:10,color:"#E05555",marginTop:4}}>⚠ {errors.tipoAccionamiento}</div>}
     </div>
     <div style={{marginBottom:14}}>
       <div style={{...S.lbl,marginBottom:8,color:errors.telaId?"#E05555":"#ccc"}}>Tela {errors.telaId&&<span style={{color:"#E05555"}}>* Selecciona una tela</span>}</div>
@@ -880,9 +1058,30 @@ function CortinaForm({p,update,telas,setTelas,confecciones,setConfecciones,error
       <div style={{...S.lbl,color:errors.rielId?"#E05555":"#ccc"}}>Riel {errors.rielId&&<span style={{color:"#E05555"}}>* Selecciona un riel</span>}</div>
       <select style={{...S.sel,borderColor:errors.rielId?"#E05555":undefined}} value={p.rielId} onChange={function(e){update("rielId",e.target.value);}}>
         <option value="">Seleccionar riel...</option>
-        {RIELES.map(function(r){return <option key={r.id} value={r.id}>{r.nombre} — {fmt(r.precio)} / {r.unidad}</option>;})}
+        {RIELES.filter(function(r){
+          const esMotorizado=r.nombre.toLowerCase().includes("motorizado");
+          if(p.tipoAccionamiento==="MOTORIZADA") return esMotorizado;
+          if(p.tipoAccionamiento==="MANUAL") return !esMotorizado;
+          return true;
+        }).map(function(r){return <option key={r.id} value={r.id}>{r.nombre} — {fmt(r.precio)} / {r.unidad}</option>;})}
+        {(rielesCustom||[]).length>0&&<option disabled>── Rieles personalizados ──</option>}
+        {(rielesCustom||[]).map(function(r){return <option key={r.id} value={r.id}>{r.nombre} — {fmt(r.precio)} / ml</option>;})}
       </select>
       {errors.rielId&&<div style={{fontSize:10,color:"#E05555",marginTop:2}}>⚠ {errors.rielId}</div>}
+      {!addingRiel?<div style={S.addBtn} onClick={function(){setAddingRiel(true);}}>+ Agregar riel personalizado</div>:(
+        <div style={{...S.card,marginTop:8,padding:"14px 18px"}}>
+          <div style={{...S.lbl,marginBottom:10,color:C.goldL}}>Riel Personalizado</div>
+          <div style={{...S.g2,marginBottom:10}}>
+            <div style={S.field}><div style={S.lbl}>Nombre del riel</div><input style={S.inp} value={newRiel.nombre} onChange={function(e){setNewRiel(function(prev){return{...prev,nombre:e.target.value};});}} placeholder="ej. Riel Especial XYZ"/></div>
+            <div style={S.field}><div style={S.lbl}>Precio ($/ml)</div><input type="number" step="0.01" style={S.inp} value={newRiel.precio} onChange={function(e){setNewRiel(function(prev){return{...prev,precio:e.target.value};});}} placeholder="ej. 45"/></div>
+          </div>
+          <div style={{fontSize:10,color:C.muted,marginBottom:10}}>El precio se aplicará por metro lineal según el ancho ingresado.</div>
+          <div style={{display:"flex",gap:8}}>
+            <div style={{...S.radio(true),cursor:"pointer"}} onClick={addRiel}>✓ Agregar</div>
+            <div style={{...S.radio(false),cursor:"pointer"}} onClick={function(){setAddingRiel(false);setNewRiel({nombre:"",precio:""});}}>Cancelar</div>
+          </div>
+        </div>
+      )}
     </div>
     <div style={{...S.field,marginBottom:14}}>
       <div style={{...S.lbl,color:errors.dosVias?"#E05555":"#ccc"}}>Vías {errors.dosVias&&<span style={{color:"#E05555"}}>* Selecciona las vías</span>}</div>
@@ -891,6 +1090,33 @@ function CortinaForm({p,update,telas,setTelas,confecciones,setConfecciones,error
         <div style={S.radio(p.dosVias===false)} onClick={function(){update("dosVias",false);}}>UNA VÍA</div>
       </div>
     </div>
+    {p.tipoAccionamiento==="MOTORIZADA"&&(function(){
+      const rielSel=[...RIELES,...(rielesCustom||[])].find(function(r){return r.id===p.rielId;});
+      const rielNombre=rielSel?rielSel.nombre.toLowerCase():"";
+      const esTBC=rielNombre.includes("tbc");
+      const esCeltic=rielNombre.includes("celtic");
+      const esSomfy=rielNombre.includes("somfy");
+      const controlesFiltrados=[...CORTINA_CONTROLES,...(controlesCustom||[])].filter(function(c){
+        if(c.custom)return true;
+        const cn=c.nombre.toLowerCase();
+        if(esTBC)return cn.includes("tbc");
+        if(esCeltic)return cn.includes("celtic");
+        if(esSomfy)return cn.includes("somfy");
+        return true;
+      });
+      return(
+        <div style={{marginBottom:14}}>
+          <div style={S.field}>
+            <div style={S.lbl}>Control Remoto</div>
+            <select style={S.sel} value={p.controlId||""} onChange={function(e){update("controlId",e.target.value);}}>
+              <option value="">Sin control</option>
+              {controlesFiltrados.map(function(c){return <option key={c.id} value={c.id}>{c.nombre} — {fmt(c.precio)}</option>;})}
+            </select>
+          </div>
+          <CustomItemAdder label="Agregar control personalizado" onAdd={function(item){setControlesCustom(function(prev){return[...prev,item];});update("controlId",item.id);}} onPendingChange={makePendingHandler?makePendingHandler("p"+pieceIdx+"-cort-control"):undefined}/>
+        </div>
+      );
+    })()}
 
     <div style={{...S.field,marginBottom:14}}>
       <div style={S.lbl}>Precio Confección por paño — editable{altoDoble&&<span style={{color:"#ff9944",marginLeft:6,fontSize:10}}>DOBLE ALTURA $48</span>}</div>
@@ -945,12 +1171,13 @@ function CortinaForm({p,update,telas,setTelas,confecciones,setConfecciones,error
 
 
 // ─── TOLDO / PÉRGOLA FORM ─────────────────────────────────────────────────────
-function ToldoForm({p, update}) {
+function ToldoForm({p, update, updateMany, motoresCustom, setMotoresCustom, controlesCustom, setControlesCustom, makePendingHandler, pieceIdx}) {
   const isToldo = p.tipoProducto==="TOLDO VERTICAL";
   const tabla = isToldo ? TOLDO_VERTICAL : PERGOLA_BRAZO;
   const range = getRangeToldo(tabla);
   const motorized = p.tipoAccionamiento==="MOTORIZADA";
-  const motores = isToldo ? MOTORES_TOLDO : MOTORES_PERGOLA;
+  const motores = [...(isToldo ? MOTORES_TOLDO : MOTORES_PERGOLA),...(motoresCustom||[])];
+  const controlesToldoCat = [...CONTROLES_TOLDO,...(controlesCustom||[])];
   const ancho = parseFloat(p.ancho)||0;
   const alto = parseFloat(p.alto)||0;
   const altoDoble = alto > 350;
@@ -1025,26 +1252,32 @@ function ToldoForm({p, update}) {
       <div style={{...S.field,marginBottom:14}}>
         <div style={S.lbl}>Accionamiento</div>
         <div style={S.radioRow}>
-          <div style={S.radio(p.tipoAccionamiento==="MANUAL")} onClick={function(){update("tipoAccionamiento","MANUAL");}}>MANUAL</div>
+          <div style={S.radio(p.tipoAccionamiento==="MANUAL")} onClick={function(){updateMany({tipoAccionamiento:"MANUAL",motorId:"",controlId:""});}}>MANUAL</div>
           <div style={S.radio(p.tipoAccionamiento==="MOTORIZADA")} onClick={function(){update("tipoAccionamiento","MOTORIZADA");}}>MOTORIZADA</div>
         </div>
       </div>
 
       {motorized&&(
-        <div style={{...S.g2,marginBottom:14}}>
-          <div style={S.field}>
-            <div style={S.lbl}>Motor</div>
-            <select style={S.sel} value={p.motorId||""} onChange={function(e){update("motorId",e.target.value);}}>
-              <option value="">Sin motor</option>
-              {motores.map(function(m){return(<option key={m.id} value={m.id}>{m.nombre} — {fmt(m.precio)}</option>);})}
-            </select>
+        <div style={{marginBottom:14}}>
+          <div style={S.g2}>
+            <div style={S.field}>
+              <div style={S.lbl}>Motor</div>
+              <select style={S.sel} value={p.motorId||""} onChange={function(e){update("motorId",e.target.value);}}>
+                <option value="">Sin motor</option>
+                {motores.map(function(m){return(<option key={m.id} value={m.id}>{m.nombre} — {fmt(m.precio)}</option>);})}
+              </select>
+            </div>
+            <div style={S.field}>
+              <div style={S.lbl}>Control</div>
+              <select style={S.sel} value={p.controlId||""} onChange={function(e){update("controlId",e.target.value);}}>
+                <option value="">Sin control</option>
+                {controlesToldoCat.map(function(ctrl){return <option key={ctrl.id} value={ctrl.id}>{ctrl.nombre} — {fmt(ctrl.precio)}</option>;})}
+              </select>
+            </div>
           </div>
-          <div style={S.field}>
-            <div style={S.lbl}>Control</div>
-            <select style={S.sel} value={p.controlId||""} onChange={function(e){update("controlId",e.target.value);}}>
-              <option value="">Sin control</option>
-              {CONTROLES_TOLDO.map(function(ctrl){return <option key={ctrl.id} value={ctrl.id}>{ctrl.nombre} — {fmt(ctrl.precio)}</option>;})}
-            </select>
+          <div style={S.g2}>
+            <CustomItemAdder label="Agregar motor personalizado" onAdd={function(item){setMotoresCustom(function(prev){return[...prev,item];});update("motorId",item.id);}} onPendingChange={makePendingHandler?makePendingHandler("p"+pieceIdx+"-toldo-motor"):undefined}/>
+            <CustomItemAdder label="Agregar control personalizado" onAdd={function(item){setControlesCustom(function(prev){return[...prev,item];});update("controlId",item.id);}} onPendingChange={makePendingHandler?makePendingHandler("p"+pieceIdx+"-toldo-control"):undefined}/>
           </div>
         </div>
       )}
@@ -1391,10 +1624,12 @@ function OtroForm({p, update}) {
   );
 }
 
-function PieceCard({p,idx,onChange,onRemove,telas,setTelas,confecciones,setConfecciones}){
-  function update(k,v){onChange({...p,[k]:v});}
+function PieceCard({p,idx,onChange,onRemove,telas,setTelas,confecciones,setConfecciones,rielesCustom,setRielesCustom,motoresCustom,setMotoresCustom,controlesCustom,setControlesCustom,cenefasCustom,setCenefasCustom,makePendingHandler}){
+  function stripTemp(obj){const{_motoresCustom,_controlesCustom,_cenefasCustom,...rest}=obj;return rest;}
+  function update(k,v){onChange(stripTemp({...p,[k]:v}));}
+  function updateMany(obj){onChange(stripTemp({...p,...obj}));}
   function cloneAction(){
-    const clon = {...p, id:uid(), area: p.area};
+    const clon = stripTemp({...p, id:uid(), area: p.area});
     onChange(clon, "clone");
   }
   const isPersiana=p.tipoProducto==="PERSIANA";
@@ -1405,7 +1640,7 @@ function PieceCard({p,idx,onChange,onRemove,telas,setTelas,confecciones,setConfe
   const isOtro=p.tipoProducto==="OTRO";
   let badgeTotal=0;
   if(isPersiana){const c=calcPersianaTotal(p);badgeTotal=c?c.total:0;}
-  else if(isCortina&&p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto){badgeTotal=calcCortinaTotal(p,telas||[],confecciones||[]).total*(parseInt(p.cantidad)||1);}
+  else if(isCortina&&p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto){badgeTotal=calcCortinaTotal(p,telas||[],confecciones||[],rielesCustom||[]).total*(parseInt(p.cantidad)||1);}
   else if(isToldo||isPergola){const c=calcToldoTotal(p);badgeTotal=(c&&!c.noDisponible)?c.total:0;}
   else if(isPapel){badgeTotal=calcPapelTotal(p)+extrasTotal(p.papelServicios||[]);}
   else if(isOtro){badgeTotal=calcOtroTotal(p);}
@@ -1441,9 +1676,9 @@ function PieceCard({p,idx,onChange,onRemove,telas,setTelas,confecciones,setConfe
       </div>
       {(function(){
         const errs=validatePiece(p,telas);
-        if(isPersiana) return <PersianaForm p={p} update={update} errors={errs}/>;
-        if(isCortina) return <CortinaForm p={p} update={update} telas={telas} setTelas={setTelas} confecciones={confecciones} setConfecciones={setConfecciones} errors={errs}/>;
-        if(isToldo||isPergola) return <ToldoForm p={p} update={update}/>;
+        if(isPersiana) return <PersianaForm p={p} update={update} updateMany={updateMany} motoresCustom={motoresCustom} setMotoresCustom={setMotoresCustom} controlesCustom={controlesCustom} setControlesCustom={setControlesCustom} cenefasCustom={cenefasCustom} setCenefasCustom={setCenefasCustom} makePendingHandler={makePendingHandler} pieceIdx={idx} errors={errs}/>;
+        if(isCortina) return <CortinaForm p={p} update={update} updateMany={updateMany} telas={telas} setTelas={setTelas} confecciones={confecciones} setConfecciones={setConfecciones} rielesCustom={rielesCustom} setRielesCustom={setRielesCustom} controlesCustom={controlesCustom} setControlesCustom={setControlesCustom} makePendingHandler={makePendingHandler} pieceIdx={idx} errors={errs}/>;
+        if(isToldo||isPergola) return <ToldoForm p={p} update={update} updateMany={updateMany} motoresCustom={motoresCustom} setMotoresCustom={setMotoresCustom} controlesCustom={controlesCustom} setControlesCustom={setControlesCustom} makePendingHandler={makePendingHandler} pieceIdx={idx}/>;
         if(isPapel) return <PapelForm p={p} update={update} errors={errs}/>;
         if(isOtro) return <OtroForm p={p} update={update}/>;
         return null;
@@ -1492,18 +1727,36 @@ const VIVENDI_TERMS = `<div style="font-size:9.5px;color:#222;line-height:1.7;wi
 </div>`;
 
 const TERMS = `<div style="font-size:9.5px;color:#222;line-height:1.7;width:100%">
-<div style="font-weight:800;font-size:11px;margin-bottom:8px;text-align:center;letter-spacing:1px">THE BLIND CONCEPT — TÉRMINOS Y CONDICIONES DE VENTA E INSTALACIÓN</div>
-<p style="margin-bottom:6px">Al firmar este documento, el cliente autoriza a THE BLIND CONCEPT a realizar el trabajo detallado y se compromete a pagar el monto total indicado.</p>
-<p style="font-weight:700;margin-bottom:3px">1. Condiciones Generales</p>
-<p>Todos los pedidos son fabricados a la medida. No se aceptan devoluciones ni cancelaciones una vez confirmado el pedido. TBC no se hace responsable de variaciones menores en medidas (±1/8" a 5/8"). La desinstalación de persianas existentes no está incluida y tendrá costo adicional. Si las medidas son proporcionadas por el cliente, la empresa no será responsable por errores derivados.</p>
-<p style="font-weight:700;margin:5px 0 3px">2. Garantía</p>
-<p>Garantía de 3 años a partir de la fecha de instalación. Cubre defectos de fábrica y/o instalación. Exclusiones: motores sin protector de voltaje, daños por humedad, mal uso, accidentes o desgaste natural. La empresa se reserva el derecho de reparar o reemplazar la pieza defectuosa.</p>
-<p style="font-weight:700;margin:5px 0 3px">3. Responsabilidad</p>
-<p>TBC no se hace responsable por daños en tuberías, cables u otras instalaciones ocultas durante la instalación, ni por estructuras defectuosas o marcos de mala calidad. Las instalaciones motorizadas son básicas y no incluyen molduras ni cableado adicional.</p>
-<p style="font-weight:700;margin:5px 0 3px">4. Obligaciones del Cliente</p>
-<p>Coordinar accesos y permisos. Notificar requerimientos especiales. Estar presente durante la instalación. Visitas fuera de Panamá generarán costo adicional por transporte y viáticos.</p>
-<p style="font-weight:700;margin:5px 0 3px">5. Condiciones de Pago</p>
-<p>70% de abono al firmar. El pago del abono sin firma se considera aceptación expresa de estos términos. 30% restante antes de la instalación. Pagos aceptados: efectivo, transferencia, Yappy, cheque, tarjeta. Todos los abonos son no reembolsables.</p>
+<div style="font-weight:800;font-size:11px;margin-bottom:12px;text-align:center;letter-spacing:1px">THE BLIND CONCEPT — TÉRMINOS Y CONDICIONES DE VENTA E INSTALACIÓN</div>
+
+<div style="margin-bottom:14px;padding:12px 14px;background:#f5f5f5;border-radius:4px">
+  <p style="font-weight:800;font-size:10.5px;margin-bottom:6px">CONDICIONES DE PAGO</p>
+  <p style="font-weight:700;margin-bottom:4px">Se requiere un abono inicial del 70% para iniciar la fabricación.</p>
+  <p style="font-weight:700;margin-bottom:8px">El 30% restante deberá estar cancelado antes o el día de la instalación, previo al inicio de los trabajos.</p>
+  <p style="font-weight:800;margin-bottom:2px">Datos para transferencia:</p>
+  <p style="font-weight:700">ACH BANCO GENERAL &nbsp;|&nbsp; CUENTA CORRIENTE 03-97-01-148141-4 &nbsp;|&nbsp; VIVENDI DECOR</p>
+</div>
+
+<p style="margin-bottom:6px">Al firmar este documento o realizar el pago del abono, el cliente autoriza a THE BLIND CONCEPT (TBC) a fabricar, suministrar e instalar los productos detallados en la cotización y acepta los siguientes términos y condiciones.</p>
+
+<p style="font-weight:700;margin:6px 0 3px">1. Condiciones Generales</p>
+<p>Todos los productos son fabricados a la medida y personalizados según las especificaciones aprobadas por el cliente. Por esta razón, no se aceptan devoluciones, cambios ni cancelaciones una vez confirmado el pedido. TBC no se hace responsable por variaciones menores en medidas, tonalidades, textura, alineación o caída de telas propias de productos fabricados a medida. Las medidas pueden presentar tolerancias aproximadas de ±1/8" hasta ±5/8" dependiendo del producto y sistema instalado. La desinstalación de persianas, cortinas o estructuras existentes no está incluida salvo que se especifique por escrito en la cotización. Si las medidas son suministradas por el cliente, TBC no será responsable por errores de fabricación derivados de medidas incorrectas. Las imágenes, muestras y catálogos son referenciales y pueden existir ligeras variaciones de color o textura entre muestras y producto final debido a lotes de fabricación e iluminación.</p>
+
+<p style="font-weight:700;margin:6px 0 3px">2. Tiempos de Entrega e Instalación</p>
+<p>Los tiempos de entrega e instalación son estimados y pueden variar por disponibilidad de materiales, importaciones, retrasos logísticos, condiciones climáticas o situaciones fuera del control de TBC. TBC no será responsable por retrasos ocasionados por terceros, proveedores, aduanas, edificios, PH, restricciones de acceso o causas de fuerza mayor. En caso de que el cliente solicite reprogramar la instalación luego de confirmado el pedido o una vez coordinada la visita, TBC podrá aplicar cargos adicionales.</p>
+
+<p style="font-weight:700;margin:6px 0 3px">3. Garantía</p>
+<p>Los productos cuentan con garantía limitada de 3 años a partir de la fecha de instalación. La garantía cubre únicamente defectos de fabricación y/o errores de instalación realizados por TBC. La garantía no cubre: daños por mal uso, golpes, accidentes, manipulación por terceros, humedad, filtraciones, exposición salina o corrosión, desgaste natural, mascotas, niños, limpieza inadecuada, variaciones normales del producto, fallas eléctricas, motores sin protector de voltaje, ni daños causados por fluctuaciones eléctricas. La garantía quedará anulada si el producto es modificado, reparado o intervenido por terceros ajenos a TBC. TBC se reserva el derecho de reparar o reemplazar parcial o totalmente la pieza defectuosa según criterio técnico. La garantía no incluye visitas de mantenimiento, limpieza o ajustes menores por uso normal.</p>
+
+<p style="font-weight:700;margin:6px 0 3px">4. Responsabilidad</p>
+<p>TBC no será responsable por daños en tuberías, cables eléctricos, estructuras ocultas, gypsum, mármol, madera, marcos defectuosos o cualquier elemento no visible previo a la instalación. El cliente es responsable de informar previamente sobre tuberías, cableado oculto, refuerzos especiales o condiciones estructurales relevantes. Las instalaciones motorizadas incluyen únicamente conexión básica del motor y no incluyen trabajos eléctricos, canaletas, molduras, pintura, gypsum, resanes o cableado adicional salvo especificación escrita. TBC no será responsable por daños indirectos, lucro cesante, pérdidas comerciales o afectaciones derivadas del uso o imposibilidad de uso del producto.</p>
+
+<p style="font-weight:700;margin:6px 0 3px">5. Obligaciones del Cliente</p>
+<p>El cliente deberá garantizar acceso al área de trabajo, coordinar permisos de entrada, asegurar disponibilidad de estacionamiento si aplica, proteger muebles u objetos delicados, y estar presente o dejar una persona autorizada durante la instalación. Si la instalación no puede realizarse por causas atribuibles al cliente, podrá generarse un cargo adicional por nueva visita. Las instalaciones fuera de la Ciudad de Panamá podrán generar costos adicionales por transporte, hospedaje y viáticos.</p>
+
+<p style="font-weight:700;margin:6px 0 3px">6. Aceptación de Instalación</p>
+<p>Una vez finalizada la instalación y aprobado el trabajo por el cliente o su representante, se entenderá como entrega conforme. Cualquier observación deberá ser notificada dentro de las primeras 48 horas posteriores a la instalación. Todo abono realizado se considera aceptación expresa de estos términos y condiciones, aun sin firma física del documento.</p>
+
 <div style="margin-top:18px;display:grid;grid-template-columns:1fr 1fr;gap:20px">
   <div>
     <div style="border-bottom:1px solid #666;margin-bottom:4px;height:28px"></div>
@@ -1533,8 +1786,16 @@ const LOGO_SVG = `<svg width="220" height="90" viewBox="0 0 440 158" fill="none"
   <text x="138" y="154" font-family="Georgia,'Times New Roman',serif" font-size="48" font-weight="400" fill="#111">Concept</text>
 </svg>`;
 
-function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,empresa,descuento){
+function generarNumCotizacion(empresa){
+  const fechaISO=new Date().toISOString().slice(0,10).replace(/-/g,"");
+  const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const rand=Array.from({length:4},function(){return chars[Math.floor(Math.random()*chars.length)];}).join("");
+  return (empresa==="VIVENDI"?"VIV":"TBC")+"-"+fechaISO+"-"+rand;
+}
+
+function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,empresa,descuento,rielesCustom,comentarios,stateBlob,numCotizacion){
   const fecha=new Date().toLocaleDateString("es-CR");
+  if(!numCotizacion)numCotizacion=generarNumCotizacion(empresa);
   const f=(n)=>"$"+(Number(n||0).toFixed(2));
   const hayPapelOOtro=pieces.some(function(p){return p.tipoProducto==="PAPEL DE PARED"||p.tipoProducto==="OTRO";});
   const persianasYCortinas=pieces.filter(function(p){return p.tipoProducto==="PERSIANA"||p.tipoProducto==="CORTINA DE TELA"||p.tipoProducto==="TOLDO VERTICAL"||p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE";});
@@ -1550,7 +1811,7 @@ function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,e
     const isPapel=p.tipoProducto==="PAPEL DE PARED";
     const isOtro=p.tipoProducto==="OTRO";
     let precioLista=0,precioDesc=0,total=0;
-    const desc=buildDesc(p,telas,confecciones);
+    const desc=buildDesc(p,telas,confecciones,rielesCustom||[]);
     const qty=parseInt(p.cantidad)||1;
     if(isPersiana){
       const c=calcPersianaTotal(p);
@@ -1581,7 +1842,7 @@ function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,e
           <td style="padding:10px 8px;text-align:right;color:#999">—</td>
         </tr>`;
       }
-      const c=calcCortinaTotal(p,telas,confecciones);
+      const c=calcCortinaTotal(p,telas,confecciones,rielesCustom||[]);
       const qtyC=parseInt(p.cantidad)||1;
       precioDesc=c.total;           // precio descuento por 1 pieza
       precioLista=c.total*1.40;     // precio lista por 1 pieza
@@ -1658,7 +1919,7 @@ function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,e
 
   const subtotalBruto=pieces.reduce(function(sum,p){
     if(p.tipoProducto==="PERSIANA"){const c=calcPersianaTotal(p);return sum+(c?c.total:0);}
-    if(p.tipoProducto==="CORTINA DE TELA"&&p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto)return sum+calcCortinaTotal(p,telas,confecciones).total*(parseInt(p.cantidad)||1);
+    if(p.tipoProducto==="CORTINA DE TELA"&&p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto)return sum+calcCortinaTotal(p,telas,confecciones,rielesCustom||[]).total*(parseInt(p.cantidad)||1);
     if(p.tipoProducto==="TOLDO VERTICAL"||p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE"){const c=calcToldoTotal(p);return sum+((c&&!c.noDisponible)?c.total:0);}
     if(p.tipoProducto==="PAPEL DE PARED")return sum+calcPapelTotal(p)+extrasTotal(p.papelServicios||[]);
     if(p.tipoProducto==="OTRO")return sum+calcOtroTotal(p);
@@ -1676,6 +1937,7 @@ function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,e
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Helvetica Neue',Arial,sans-serif;background:#fff;color:#111;font-size:11px}
 .page{max-width:820px;margin:0 auto;padding:32px}
+@page{margin:0.4cm}
 @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{padding:20px}}
 </style></head><body><div class="page">
 
@@ -1689,6 +1951,7 @@ body{font-family:'Helvetica Neue',Arial,sans-serif;background:#fff;color:#111;fo
       <div><strong>Teléfono:</strong> ${cliente.telefono||"—"}</div>
     </div>
     <div style="margin-top:10px;font-weight:700;font-size:11px">Fecha: ${fecha}</div>
+    <div style="margin-top:4px;font-weight:700;font-size:11px">N° Cotización: ${numCotizacion}</div>
   </div>
   <div>${empresa==="VIVENDI"
     ? '<img src="'+VIVENDI_LOGO_IMG+'" style="height:60px;width:auto;mix-blend-mode:multiply;" />'
@@ -1748,7 +2011,22 @@ ${instalacionMsg?'<div style="background:#f0f9f0;border:1px solid #c0e0c0;border
   </tr>
 </table>
 
-<div style="page-break-before:always;margin-top:0">${empresa==="VIVENDI"?VIVENDI_TERMS:TERMS}</div>
+<div style="page-break-before:always;margin-top:0">
+${(function(){
+  const digitToLetter={"0":"j","1":"a","2":"b","3":"c","4":"d","5":"e","6":"f","7":"g","8":"h","9":"i"};
+  function encode(n){return String(n).replace(/[0-9]/g,function(d){return digitToLetter[d];});}
+  const coded=pieces.map(function(p,i){
+    const ancho=p.ancho?encode(p.ancho):"";
+    const alto=p.alto?encode(p.alto):"";
+    return ancho&&alto?"p"+(i+1)+ancho+"x"+alto:"";
+  }).filter(Boolean).join("");
+  return coded?`<div style="font-size:7px;color:#999;margin-bottom:16px;letter-spacing:0;line-height:1;word-break:break-all">${numCotizacion}:${coded}</div>`:"";
+})()}
+${empresa==="VIVENDI"?VIVENDI_TERMS:TERMS}</div>
+
+${comentarios?`<div style="margin-top:24px;padding:16px 20px;background:#f9f9f9;border:1px solid #e0e0e0;border-radius:8px;font-size:11px;line-height:1.7;color:#333"><strong style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#888">Comentarios y Notas</strong><p style="margin-top:8px;white-space:pre-wrap">${comentarios.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</p></div>`:""}
+
+${stateBlob?`<div style="page-break-before:always;color:#ffffff;background:#ffffff;font-size:8px;line-height:1.3;overflow-wrap:anywhere;word-break:break-all">${stateBlob}</div>`:""}
 
 </div><script>window.onload=function(){setTimeout(function(){window.print();},500);}</script></body></html>`;
 }
@@ -1769,7 +2047,7 @@ function GlobalExtrasSummary({extras}){
   });
 }
 
-function PiecesSummary({pieces,telas,confecciones}){
+function PiecesSummary({pieces,telas,confecciones,rielesCustom}){
   return pieces.map(function(p,i){
     let sub=0,label="",complete=false;
     if(p.tipoProducto==="PERSIANA"){
@@ -1778,7 +2056,7 @@ function PiecesSummary({pieces,telas,confecciones}){
     } else if(p.tipoProducto==="CORTINA DE TELA"){
       const ok=p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto;
       const qty=parseInt(p.cantidad)||1;
-      sub=ok?calcCortinaTotal(p,telas,confecciones).total*qty:0;label=p.area||"Cortina de tela";complete=!!ok;
+      sub=ok?calcCortinaTotal(p,telas,confecciones,rielesCustom||[]).total*qty:0;label=p.area||"Cortina de tela";complete=!!ok;
     } else if(p.tipoProducto==="TOLDO VERTICAL"||p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE"){
       const c=calcToldoTotal(p);
       sub=(c&&!c.noDisponible)?c.total:0;
@@ -1804,19 +2082,347 @@ function PiecesSummary({pieces,telas,confecciones}){
   });
 }
 
+// ─── ORDEN DE PRODUCCIÓN ────────────────────────────────────────────────────
+// Campos requeridos por tipo de producto
+function camposOrdenPorTipo(tipo){
+  if(tipo==="PERSIANA")return [
+    {key:"colorTela",label:"Color y código de tela",type:"text",req:true,mem:"colorTela"},
+    {key:"contrapeso",label:"Tipo de contrapeso",type:"text",req:true,mem:"contrapeso"},
+    {key:"mando",label:"Mando",type:"select",options:["Derecha","Izquierda"],req:true},
+    {key:"enrollado",label:"Enrollado",type:"select",options:["Regular","Trasero"],req:true},
+    {key:"notas",label:"Notas",type:"text",req:false},
+  ];
+  if(tipo==="CORTINA DE TELA")return [
+    {key:"tipoBasta",label:"Tipo de basta",type:"text",req:true,mem:"tipoBasta"},
+    {key:"instalacion",label:"Instalación",type:"select",options:["Pared","Techo"],req:true},
+    {key:"notas",label:"Notas",type:"text",req:false},
+  ];
+  if(tipo==="TOLDO VERTICAL"||tipo==="PÉRGOLA BRAZO EXTENSIBLE")return [
+    {key:"colorTela",label:"Color y código de tela",type:"text",req:true,mem:"colorTela"},
+    {key:"notas",label:"Notas",type:"text",req:false},
+  ];
+  return [{key:"notas",label:"Notas",type:"text",req:false}];
+}
+
+// Solo piezas que van a producción (no papel/otro)
+function piezasProduccion(pieces){
+  return pieces.filter(function(p){
+    return p.tipoProducto==="PERSIANA"||p.tipoProducto==="CORTINA DE TELA"||p.tipoProducto==="TOLDO VERTICAL"||p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE";
+  });
+}
+
+function ordenPieceComplete(piece, datos){
+  const campos=camposOrdenPorTipo(piece.tipoProducto);
+  const d=datos||{};
+  return campos.every(function(c){ return !c.req || (d[c.key]!==undefined && String(d[c.key]).trim()!==""); });
+}
+
+// Construye el HTML de la orden de producción (sin precios)
+function buildOrdenHTML(prod, ordenData, telas, confecciones, rielesCustom, motoresCustom, controlesCustom, cliente, numCotizacion, empresa){
+  const fecha = new Date().toLocaleDateString("es-CR");
+  const numOrden = numCotizacion ? numCotizacion.replace(/^(TBC|VIV)-/, "ORD-") : "ORD-";
+  const clienteNom = (cliente.nombre+" "+cliente.apellido).trim() || "—";
+  const esc = function(s){ return String(s==null?"":s).replace(/</g,"&lt;").replace(/>/g,"&gt;"); };
+
+  function motorNombre(p){ const m=[...MOTORES,...MOTORES_TOLDO,...MOTORES_PERGOLA,...(motoresCustom||[])].find(function(x){return x.id===p.motorId;}); return m?m.nombre:"—"; }
+  function controlNombre(p){ const c=[...PERSIANA_CONTROLES,...CORTINA_CONTROLES,...CONTROLES_TOLDO,...(controlesCustom||[])].find(function(x){return x.id===p.controlId;}); return c?c.nombre:"—"; }
+  function getD(p){ return ordenData[p.id] || {}; }
+
+  const tiposOrden = [
+    {tipo:"PERSIANA", titulo:"PERSIANAS", color:"#B8965A"},
+    {tipo:"CORTINA DE TELA", titulo:"CORTINAS DE TELA", color:"#3E9E88"},
+    {tipo:"TOLDO VERTICAL", titulo:"TOLDOS VERTICALES", color:"#3E7EA8"},
+    {tipo:"PÉRGOLA BRAZO EXTENSIBLE", titulo:"PÉRGOLAS BRAZO EXTENSIBLE", color:"#3E7EA8"},
+  ];
+
+  function filaDato(label, valor){
+    return `<td style="padding:8px 10px;border:1px solid #ddd;vertical-align:top">
+      <div style="font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:#999;font-weight:700;margin-bottom:3px">${esc(label)}</div>
+      <div style="font-size:12px;color:#111;font-weight:600">${esc(valor||"—")}</div>
+    </td>`;
+  }
+
+  let secciones = "";
+  tiposOrden.forEach(function(t){
+    const piezas = prod.filter(function(p){ return p.tipoProducto===t.tipo; });
+    if(piezas.length===0) return;
+    let filas = "";
+    piezas.forEach(function(p, i){
+      const d = getD(p);
+      const producto = descProductoPieza(p, telas);
+      const medidas = (p.ancho&&p.alto) ? (p.ancho+" × "+p.alto+" cm") : "—";
+      const cant = parseInt(p.cantidad)||1;
+      let celdas = "";
+      celdas += filaDato("Pieza", "#"+(i+1));
+      celdas += filaDato("Área", p.area);
+      celdas += filaDato("Producto", producto);
+      celdas += filaDato("Medidas", medidas);
+      if(cant>1) celdas += filaDato("Cantidad", cant);
+      if(t.tipo==="PERSIANA"){
+        if(p.tipoAccionamiento==="MOTORIZADA"){ celdas += filaDato("Motor", motorNombre(p)); celdas += filaDato("Control", controlNombre(p)); }
+        celdas += filaDato("Color/código tela", d.colorTela);
+        celdas += filaDato("Tipo de contrapeso", d.contrapeso);
+        celdas += filaDato("Mando", d.mando);
+        celdas += filaDato("Enrollado", d.enrollado);
+      } else if(t.tipo==="CORTINA DE TELA"){
+        const tela=[...(telas||[])].find(function(x){return x.id===p.telaId;});
+        const conf=[...(confecciones||[])].find(function(x){return x.id===p.confeccionId;});
+        const riel=[...RIELES,...(rielesCustom||[])].find(function(x){return x.id===p.rielId;});
+        celdas += filaDato("Confección", conf?conf.nombre:"—");
+        celdas += filaDato("Riel", riel?riel.nombre:"—");
+        celdas += filaDato("Vías", p.dosVias?"2 vías":"1 vía");
+        celdas += filaDato("Tipo de basta", d.tipoBasta);
+        celdas += filaDato("Instalación", d.instalacion);
+      } else {
+        if(p.tipoAccionamiento==="MOTORIZADA"){ celdas += filaDato("Motor", motorNombre(p)); celdas += filaDato("Control", controlNombre(p)); }
+        celdas += filaDato("Color/código tela", d.colorTela);
+      }
+      const notas = d.notas ? `<tr><td colspan="6" style="padding:8px 10px;border:1px solid #ddd;background:#fafafa"><span style="font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:#999;font-weight:700">Notas: </span><span style="font-size:11px;color:#333">${esc(d.notas)}</span></td></tr>` : "";
+      const imgSrc = getProductImage(p, telas);
+      const imgBlock = imgSrc ? `<div style="flex-shrink:0;width:90px;height:68px;border-radius:6px;overflow:hidden;border:1px solid #e0e0e0"><img src="${imgSrc}" style="width:100%;height:100%;object-fit:cover" /></div>` : "";
+      filas += `<div style="margin-bottom:14px;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;page-break-inside:avoid">
+        <div style="display:flex;gap:12px;align-items:stretch">
+          ${imgSrc?`<div style="padding:10px 0 10px 10px;display:flex;align-items:center">${imgBlock}</div>`:""}
+          <div style="flex:1;min-width:0">
+            <table style="width:100%;border-collapse:collapse;table-layout:fixed"><tbody>
+              <tr>${celdas}</tr>
+              ${notas}
+            </tbody></table>
+          </div>
+        </div>
+      </div>`;
+    });
+    secciones += `<div style="margin-top:22px;page-break-inside:avoid">
+      <div style="background:${t.color};color:#fff;padding:8px 14px;border-radius:6px 6px 0 0;font-size:13px;font-weight:800;letter-spacing:.5px">${t.titulo} <span style="opacity:.8;font-weight:600">(${piezas.length})</span></div>
+      <div style="padding:14px;background:#fff;border:1px solid #e8e8e8;border-top:none;border-radius:0 0 8px 8px">${filas}</div>
+    </div>`;
+  });
+
+  const logoBlock = empresa==="VIVENDI"
+    ? '<img src="'+VIVENDI_LOGO_IMG+'" style="height:54px;width:auto;mix-blend-mode:multiply;" />'
+    : LOGO_SVG;
+
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
+<title>Orden ${numOrden}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;background:#fff;color:#111;font-size:11px}
+.page{max-width:820px;margin:0 auto;padding:32px}
+@page{margin:0.4cm}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{padding:20px}}
+</style></head><body><div class="page">
+<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #111;padding-bottom:16px;margin-bottom:8px">
+  <div>
+    <div style="font-size:11px;color:#999;letter-spacing:2px;text-transform:uppercase;font-weight:600">Orden de Producción</div>
+    <div style="font-size:22px;font-weight:900;color:#111;margin-top:2px">${numOrden}</div>
+    <div style="margin-top:10px;font-size:12px;color:#333"><strong>Fecha:</strong> ${fecha}</div>
+    <div style="font-size:12px;color:#333"><strong>N° Cotización:</strong> ${esc(numCotizacion||"—")}</div>
+  </div>
+  <div>${logoBlock}</div>
+</div>
+${secciones}
+<div style="margin-top:30px;padding-top:14px;border-top:1px solid #ddd;font-size:10px;color:#999;text-align:center">
+  Documento interno de producción — ${empresa==="VIVENDI"?"Vivendi Decor":"The Blind Concept"}
+</div>
+</div><script>window.onload=function(){setTimeout(function(){window.print();},500);}</script></body></html>`;
+}
+
+// Devuelve el nombre del producto/material específico de la pieza
+function descProductoPieza(p, telas){
+  if(p.tipoProducto==="PERSIANA") return p.tipoPersiana || "Persiana";
+  if(p.tipoProducto==="CORTINA DE TELA"){
+    const t = telas ? telas.find(function(x){return x.id===p.telaId;}) : null;
+    return t ? t.nombre : "Cortina de tela";
+  }
+  if(p.tipoProducto==="TOLDO VERTICAL") return "Toldo Vertical";
+  if(p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE") return "Pérgola Brazo Extensible";
+  return p.tipoProducto;
+}
+
+function OrdenProduccion({pieces, telas, confecciones, rielesCustom, cliente, numCotizacion, empresa, ordenData, setOrdenData, onClose, onSacarOrden}){
+  const prod = piezasProduccion(pieces);
+  const numOrden = numCotizacion ? numCotizacion.replace(/^(TBC|VIV)-/, "ORD-") : "ORD-—";
+
+  function setCampo(pieceId, key, val){
+    setOrdenData(function(prev){
+      const prevP = prev[pieceId] || {};
+      return {...prev, [pieceId]: {...prevP, [key]: val}};
+    });
+  }
+
+  // Memoria de valores por uso: junta todos los valores escritos para cada campo "mem"
+  function valoresMemoria(memKey, tipoProducto){
+    const set = {};
+    prod.forEach(function(p){
+      // colorTela se comparte entre persianas/toldos/pérgolas; tipoBasta solo cortinas; contrapeso solo persianas
+      let aplica = false;
+      if(memKey==="colorTela") aplica = (p.tipoProducto==="PERSIANA"||p.tipoProducto==="TOLDO VERTICAL"||p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE");
+      else if(memKey==="tipoBasta") aplica = (p.tipoProducto==="CORTINA DE TELA");
+      else if(memKey==="contrapeso") aplica = (p.tipoProducto==="PERSIANA");
+      if(!aplica) return;
+      const d = ordenData[p.id] || {};
+      const v = d[memKey];
+      if(v && String(v).trim()!=="") set[String(v).trim()] = true;
+    });
+    return Object.keys(set);
+  }
+
+  const incompletas = prod.filter(function(p){ return !ordenPieceComplete(p, ordenData[p.id]); });
+
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:9998,background:C.dark,overflowY:"auto"}}>
+      <div style={{...S.header,position:"sticky",top:0,zIndex:5}}>
+        {empresa==="VIVENDI" ? <VivendiLogo/> : <TBCLogo/>}
+        <div style={{marginLeft:16,borderLeft:"1px solid #e8e8e8",paddingLeft:20,flex:1}}>
+          <div style={{fontSize:11,color:"#999",letterSpacing:1.5,textTransform:"uppercase",fontWeight:500}}>Orden de Producción</div>
+          <div style={{fontSize:13,color:"#111",fontWeight:700,marginTop:2}}>{numOrden}</div>
+        </div>
+        <button onClick={onClose} style={{background:"transparent",border:"1px solid #ddd",borderRadius:8,padding:"6px 14px",color:"#999",fontSize:12,cursor:"pointer"}}>← Volver</button>
+      </div>
+
+      <div style={S.page}>
+        <div style={{...S.card,borderColor:"rgba(184,150,90,.3)"}}>
+          <div style={S.sectionLabel}>🏭 Datos de Fabricación</div>
+          <div style={{fontSize:12,color:"#aaa",lineHeight:1.6,marginBottom:8}}>
+            Completá los datos de cada pieza para generar la orden. Cliente: <strong style={{color:C.text}}>{(cliente.nombre+" "+cliente.apellido).trim()||"—"}</strong>
+          </div>
+        </div>
+
+        {prod.length===0 && (
+          <div style={{...S.card,textAlign:"center",color:"#aaa"}}>No hay piezas de producción (persianas, cortinas, toldos o pérgolas) en esta cotización.</div>
+        )}
+
+        {prod.map(function(p, idx){
+          const campos = camposOrdenPorTipo(p.tipoProducto);
+          const datos = ordenData[p.id] || {};
+          const complete = ordenPieceComplete(p, datos);
+          const tipoColor = p.tipoProducto==="PERSIANA"?C.gold:(p.tipoProducto==="CORTINA DE TELA"?"#64c8b4":"#50a0dc");
+          const producto = descProductoPieza(p, telas);
+          return (
+            <div key={p.id} style={{...S.card,borderColor:complete?"rgba(76,175,125,.3)":"rgba(224,85,85,.3)"}}>
+              {/* Cabecera de pieza: grande y contrastada */}
+              <div style={{marginBottom:18,paddingBottom:16,borderBottom:`1px solid ${C.border}`}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
+                  <span style={{fontSize:18,fontWeight:900,color:tipoColor}}>Pieza #{idx+1}</span>
+                  {complete ? <span style={S.badge(C.green)}>✓ Completa</span> : <span style={S.badge("#E05555")}>⚠ Faltan datos</span>}
+                </div>
+                <div style={{display:"flex",gap:18,flexWrap:"wrap"}}>
+                  <div>
+                    <div style={{fontSize:10,color:"#777",textTransform:"uppercase",letterSpacing:1,fontWeight:600}}>Producto</div>
+                    <div style={{fontSize:16,fontWeight:800,color:C.text}}>{producto}</div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:10,color:"#777",textTransform:"uppercase",letterSpacing:1,fontWeight:600}}>Área</div>
+                    <div style={{fontSize:16,fontWeight:800,color:C.text}}>{p.area||"—"}</div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:10,color:"#777",textTransform:"uppercase",letterSpacing:1,fontWeight:600}}>Medidas</div>
+                    <div style={{fontSize:16,fontWeight:800,color:C.text}}>{(p.ancho&&p.alto)?(p.ancho+" × "+p.alto+" cm"):"—"}</div>
+                  </div>
+                  {(parseInt(p.cantidad)||1)>1 && (
+                    <div>
+                      <div style={{fontSize:10,color:"#777",textTransform:"uppercase",letterSpacing:1,fontWeight:600}}>Cantidad</div>
+                      <div style={{fontSize:16,fontWeight:800,color:C.text}}>{p.cantidad}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div style={S.g2}>
+                {campos.map(function(campo){
+                  const val = datos[campo.key] || "";
+                  const falta = campo.req && String(val).trim()==="";
+                  if(campo.type==="select"){
+                    return (
+                      <div key={campo.key} style={S.field}>
+                        <div style={{...S.lbl,color:falta?"#E05555":"#ccc"}}>{campo.label}{campo.req&&<span style={{color:"#E05555"}}> *</span>}</div>
+                        <div style={S.radioRow}>
+                          {campo.options.map(function(opt){
+                            return <div key={opt} style={S.radio(val===opt)} onClick={function(){setCampo(p.id,campo.key,opt);}}>{opt}</div>;
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+                  // Texto, con datalist de memoria si aplica
+                  const listId = campo.mem ? ("mem-"+campo.mem+"-"+p.id) : undefined;
+                  const memVals = campo.mem ? valoresMemoria(campo.mem, p.tipoProducto).filter(function(v){return v!==val;}) : [];
+                  return (
+                    <div key={campo.key} style={S.field}>
+                      <div style={{...S.lbl,color:falta?"#E05555":"#ccc"}}>{campo.label}{campo.req&&<span style={{color:"#E05555"}}> *</span>}</div>
+                      <input style={{...S.inp,borderColor:falta?"#E05555":undefined}} value={val} list={listId} onChange={function(e){setCampo(p.id,campo.key,e.target.value);}} placeholder={campo.label}/>
+                      {listId && (
+                        <datalist id={listId}>
+                          {memVals.map(function(v){ return <option key={v} value={v}/>; })}
+                        </datalist>
+                      )}
+                      {campo.mem && memVals.length>0 && (
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:6}}>
+                          {memVals.map(function(v){
+                            return <div key={v} style={{...S.badge(C.gold),cursor:"pointer"}} onClick={function(){setCampo(p.id,campo.key,v);}}>{v}</div>;
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+
+        {prod.length>0 && (
+          incompletas.length>0 ? (
+            <div style={{marginTop:8}}>
+              <div style={{background:"rgba(224,85,85,.1)",border:"1px solid rgba(224,85,85,.3)",borderRadius:12,padding:"14px 18px",marginBottom:10}}>
+                <div style={{color:"#E05555",fontWeight:700,fontSize:13}}>⚠ Completá los datos obligatorios (*) de todas las piezas antes de sacar la orden.</div>
+              </div>
+              <button style={{...S.genBtn,marginTop:0,opacity:0.4,cursor:"not-allowed"}} disabled>📄 Sacar Orden</button>
+            </div>
+          ) : (
+            <button style={{...S.genBtn,marginTop:8}} onClick={onSacarOrden}>📄 Sacar Orden de Producción</button>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN APP ──────────────────────────────────────────────────────────────────
-export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
-  const[empresa,setEmpresa]=useState(defaultEmpresa||"");
+export default function CotizadorTBC(){
+  const[empresa,setEmpresa]=useState("");
   const[cliente,setCliente]=useState({nombre:"",apellido:"",direccion:"",email:"",telefono:""});
   const[pieces,setPieces]=useState([newPiece()]);
   const[telas,setTelas]=useState([...DEFAULT_TELAS]);
   const[confecciones,setConfecciones]=useState([...DEFAULT_CONFECCIONES]);
+  const[rielesCustom,setRielesCustom]=useState([]);
+  const[motoresCustom,setMotoresCustom]=useState([]);
+  const[controlesCustom,setControlesCustom]=useState([]);
+  const[cenefasCustom,setCenefasCustom]=useState([]);
   const[preview,setPreview]=useState(null);
+  const[ordenPreview,setOrdenPreview]=useState(null);
   const[globalExtras,setGlobalExtras]=useState([]);
   const[viatico,setViatico]=useState(0);
   const[itbms,setItbms]=useState(7);
   const[descuento,setDescuento]=useState(0);
+  const[comentarios,setComentarios]=useState("");
+  const[numCotizacion,setNumCotizacion]=useState(function(){return generarNumCotizacion("TBC");});
+  const[ordenData,setOrdenData]=useState({});
+  const[showOrden,setShowOrden]=useState(false);
+  const[extrasPendiente,setExtrasPendiente]=useState(false);
+  const[customPendientes,setCustomPendientes]=useState({});
+  const hayCustomPendiente=Object.values(customPendientes).some(function(v){return v;});
+  const makePendingHandler=React.useCallback(function(key){
+    return function(isPending){
+      setCustomPendientes(function(prev){
+        if(prev[key]===isPending)return prev;
+        return {...prev,[key]:isPending};
+      });
+    };
+  },[]);
   const[toast,setToast]=useState(null);
+  const[loadingQR,setLoadingQR]=useState(false);
+  const fileInputRef=React.useRef(null);
 
   function showToast(msg){
     setToast(msg);
@@ -1840,9 +2446,13 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
   },[]);
   function removePiece(idx){setPieces(function(ps){return ps.filter(function(_,i){return i!==idx;});});}
 
-  const piecesTotal=pieces.reduce(function(sum,p){
+  // Inyecta catálogos personalizados en cada pieza para que las funciones de cálculo y descripción los reconozcan
+  const enrichPiece=function(p){return{...p,_motoresCustom:motoresCustom,_controlesCustom:controlesCustom,_cenefasCustom:cenefasCustom};};
+  const enrichedPieces=pieces.map(enrichPiece);
+
+  const piecesTotal=enrichedPieces.reduce(function(sum,p){
     if(p.tipoProducto==="PERSIANA"){const c=calcPersianaTotal(p);return sum+(c?c.total:0);}
-    if(p.tipoProducto==="CORTINA DE TELA"&&p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto)return sum+calcCortinaTotal(p,telas,confecciones).total*(parseInt(p.cantidad)||1);
+    if(p.tipoProducto==="CORTINA DE TELA"&&p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto)return sum+calcCortinaTotal(p,telas,confecciones,rielesCustom||[]).total*(parseInt(p.cantidad)||1);
     if(p.tipoProducto==="TOLDO VERTICAL"||p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE"){const c=calcToldoTotal(p);return sum+((c&&!c.noDisponible)?c.total:0);}
     if(p.tipoProducto==="PAPEL DE PARED")return sum+calcPapelTotal(p)+extrasTotal(p.papelServicios||[]);
     if(p.tipoProducto==="OTRO")return sum+calcOtroTotal(p);
@@ -1856,9 +2466,79 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
 
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 
-  function handleDownloadPDF() {
-    const html = buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,empresa,descuento);
-    setPreview(html);
+  // Extrae el estado actual para guardar en QR
+  function buildQRState() {
+    const cleanPieces = pieces.map(function(p) {
+      const { _motoresCustom, _controlesCustom, _cenefasCustom, ...rest } = p;
+      return rest;
+    });
+    const customTelas = telas.filter(function(t) { return !DEFAULT_TELAS.find(function(dt) { return dt.id === t.id; }); });
+    const customConf = confecciones.filter(function(c) { return !DEFAULT_CONFECCIONES.find(function(dc) { return dc.id === c.id; }); });
+    return { v:1, empresa, cliente, pieces:cleanPieces, globalExtras, customTelas, customConf, rielesCustom, motoresCustom, controlesCustom, cenefasCustom, viatico, itbms, descuento, comentarios, numCotizacion, ordenData };
+  }
+
+  // Restaura el estado desde un objeto de QR
+  function restoreFromQRState(state) {
+    if (!state || !state.v) return false;
+    setEmpresa(state.empresa || "");
+    setCliente(state.cliente || { nombre:"", apellido:"", direccion:"", email:"", telefono:"" });
+    setPieces(state.pieces && state.pieces.length > 0 ? state.pieces : [newPiece()]);
+    setGlobalExtras(state.globalExtras || []);
+    setTelas([...DEFAULT_TELAS, ...(state.customTelas || [])]);
+    setConfecciones([...DEFAULT_CONFECCIONES, ...(state.customConf || [])]);
+    setRielesCustom(state.rielesCustom || []);
+    setMotoresCustom(state.motoresCustom || []);
+    setControlesCustom(state.controlesCustom || []);
+    setCenefasCustom(state.cenefasCustom || []);
+    setViatico(state.viatico || 0);
+    setItbms(state.itbms !== undefined ? state.itbms : 7);
+    setDescuento(state.descuento || 0);
+    setComentarios(state.comentarios || "");
+    if(state.numCotizacion)setNumCotizacion(state.numCotizacion);
+    setOrdenData(state.ordenData || {});
+    setPreview(null);
+    return true;
+  }
+
+  // Handler: cargar cotización desde PDF (lee texto oculto)
+  async function handleLoadFromFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    e.target.value = "";
+    setLoadingQR(true);
+    showToast("🔍 Leyendo cotización del PDF...");
+    try {
+      const blob = await readStateFromPDF(file);
+      if (blob) {
+        const state = await decompressState(blob);
+        if (state && restoreFromQRState(state)) {
+          showToast("✓ Cotización cargada correctamente");
+        } else {
+          showToast("⚠ No se pudo leer la cotización de este PDF");
+        }
+      } else {
+        showToast("⚠ Este PDF no contiene datos de cotización");
+      }
+    } catch(err) {
+      showToast("⚠ Error al leer el PDF");
+    } finally {
+      setLoadingQR(false);
+    }
+  }
+
+  async function handleDownloadPDF() {
+    setLoadingQR(true);
+    try {
+      const qrState = buildQRState();
+      const stateBlob = await compressState(qrState);
+      const html = buildPDF(cliente, enrichedPieces, telas, confecciones, viatico, itbms, globalExtras, empresa, descuento, rielesCustom, comentarios, stateBlob, numCotizacion);
+      setPreview(html);
+    } catch(e) {
+      const html = buildPDF(cliente, enrichedPieces, telas, confecciones, viatico, itbms, globalExtras, empresa, descuento, rielesCustom, comentarios, null, numCotizacion);
+      setPreview(html);
+    } finally {
+      setLoadingQR(false);
+    }
   }
 
   function loadSheetJS(cb) {
@@ -1868,6 +2548,14 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
     s.onload = function(){ cb(window.XLSX); };
     s.onerror = function(){ alert("No se pudo cargar SheetJS. Verifica tu conexión."); };
     document.head.appendChild(s);
+  }
+
+  function handleSacarOrden() {
+    const prod = piezasProduccion(enrichedPieces);
+    if(prod.length===0){ setToast("⚠ No hay piezas de producción"); setTimeout(function(){setToast(null);},2500); return; }
+    const html = buildOrdenHTML(prod, ordenData, telas, confecciones, rielesCustom, motoresCustom, controlesCustom, cliente, numCotizacion, empresa);
+    setShowOrden(false);
+    setOrdenPreview(html);
   }
 
   function handleDownloadExcel() {
@@ -1898,14 +2586,14 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
       pieces.forEach(function(p) {
         const isPersiana = p.tipoProducto === "PERSIANA";
         const qty = parseInt(p.cantidad)||1;
-        const desc = buildDesc(p, telas, confecciones);
+        const desc = buildDesc(p,telas,confecciones,rielesCustom||[]);
         if (isPersiana) {
           const c = calcPersianaTotal(p);
           if (c) {
             data.push([rowNum++, p.area||"", "PERSIANA", desc, qty, f(c.base*qty), f(c.subtotal*qty), f(c.total)]);
           }
         } else if (p.telaId&&p.confeccionId&&p.rielId&&p.ancho&&p.alto) {
-          const c = calcCortinaTotal(p, telas, confecciones);
+          const c = calcCortinaTotal(p,telas,confecciones,rielesCustom||[]);
           data.push([rowNum++, p.area||"", "CORTINA", desc, 1, f(c.total), f(c.total), f(c.total)]);
         }
       });
@@ -1949,7 +2637,7 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
       XLSX.utils.book_append_sheet(wb, ws, "Cotización");
 
       // ── Sheet 2: Detalle Persianas ──────────────────────────────────────
-      const persianas = pieces.filter(function(p){
+      const persianas = enrichedPieces.filter(function(p){
         return p.tipoProducto==="PERSIANA" && p.tipoPersiana && p.ancho && p.alto;
       });
       if (persianas.length > 0) {
@@ -1958,9 +2646,9 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
         persianas.forEach(function(p){
           const c = calcPersianaTotal(p);
           if (!c) return;
-          const motorObj = MOTORES.find(function(m){return m.id===p.motorId;});
-          const ctrlObj = PERSIANA_CONTROLES.find(function(x){return x.id===p.controlId;});
-          const cenefaObj = CENEFAS.find(function(x){return x.id===p.cenefaId;});
+          const motorObj = [...MOTORES,...(motoresCustom||[])].find(function(m){return m.id===p.motorId;});
+          const ctrlObj = [...PERSIANA_CONTROLES,...(controlesCustom||[])].find(function(x){return x.id===p.controlId;});
+          const cenefaObj = [...CENEFAS,...(cenefasCustom||[])].find(function(x){return x.id===p.cenefaId;});
           dp.push([
             p.area||"", p.tipoPersiana, f(p.ancho), f(p.alto), parseInt(p.cantidad)||1,
             f(c.base), c.mult, f(c.ajustado),
@@ -1994,24 +2682,97 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
           Selecciona la empresa para la cual estás generando la cotización
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          {(!onlyEmpresa||onlyEmpresa==="TBC")&&<button
-            onClick={function(){setEmpresa("TBC");}}
+          <button
+            onClick={function(){setEmpresa("TBC");setNumCotizacion(function(n){return n?n.replace(/^(TBC|VIV)-/,"TBC-"):generarNumCotizacion("TBC");});}}
             style={{...S.genBtn,marginTop:0,background:C.gold,padding:"16px 24px",fontSize:14}}
           >
             <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12}}>
               <TBCLogo/>
             </div>
             <div style={{marginTop:8,fontSize:13}}>The Blind Concept</div>
-          </button>}
-          {(!onlyEmpresa||onlyEmpresa==="VIVENDI")&&<button
-            onClick={function(){setEmpresa("VIVENDI");}}
+          </button>
+          <button
+            onClick={function(){setEmpresa("VIVENDI");setNumCotizacion(function(n){return n?n.replace(/^(TBC|VIV)-/,"VIV-"):generarNumCotizacion("VIVENDI");});}}
             style={{...S.genBtn,marginTop:0,background:"#111",padding:"16px 24px",fontSize:14,border:"2px solid #333"}}
           >
             <VivendiLogo/>
             <div style={{marginTop:8,fontSize:13,color:"#aaa"}}>Vivendi Decor</div>
-          </button>}
+          </button>
         </div>
       </div>
+    </div>
+  );
+
+  if(ordenPreview)return(
+    <div style={{position:"fixed",inset:0,zIndex:99999,background:"#000",display:"flex",flexDirection:"column"}}>
+      {toast&&(
+        <div style={{position:"fixed",bottom:32,left:"50%",transform:"translateX(-50%)",background:"#1a1a1a",border:"1px solid #333",borderRadius:10,padding:"12px 24px",color:"#fff",fontSize:13,fontWeight:600,zIndex:99999,boxShadow:"0 4px 20px rgba(0,0,0,.4)",whiteSpace:"nowrap"}}>
+          {toast}
+        </div>
+      )}
+      <div style={{background:"#1a1a1a",borderBottom:"1px solid #333",padding:"10px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexShrink:0,flexWrap:"wrap"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <button
+            onClick={function(){
+              const numOrden = numCotizacion ? numCotizacion.replace(/^(TBC|VIV)-/, "ORD-") : "ORD";
+              const nombre = ((cliente.apellido||cliente.nombre)||"Orden").replace(/\s+/g,"_");
+              const fileName = "Orden_"+numOrden+"_"+nombre+".html";
+              try {
+                const blob = new Blob([ordenPreview], {type:"text/html"});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+                setToast("✓ Descargando "+fileName);
+                setTimeout(function(){setToast(null);}, 2500);
+              } catch(err) {
+                setToast("✗ No se pudo descargar");
+                setTimeout(function(){setToast(null);}, 2500);
+              }
+            }}
+            style={{background:C.gold,border:"none",borderRadius:8,padding:"10px 20px",color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer"}}
+          >
+            ⬇️ Descargar
+          </button>
+          <button
+            onClick={function(){
+              const base64 = btoa(unescape(encodeURIComponent(ordenPreview)));
+              const dataUrl = "data:text/html;base64," + base64;
+              try {
+                navigator.clipboard.writeText(dataUrl).then(function(){
+                  setToast("✓ Link copiado — pégalo en Safari");
+                  setTimeout(function(){setToast(null);}, 2500);
+                }).catch(function(){
+                  const ta = document.createElement("textarea");
+                  ta.value = dataUrl;
+                  ta.style.position = "fixed";
+                  ta.style.opacity = "0";
+                  document.body.appendChild(ta);
+                  ta.focus(); ta.select();
+                  try { document.execCommand("copy"); setToast("✓ Link copiado — pégalo en Safari"); }
+                  catch(e) { setToast("✗ No se pudo copiar automáticamente"); }
+                  document.body.removeChild(ta);
+                  setTimeout(function(){setToast(null);}, 2500);
+                });
+              } catch(e) {
+                setToast("✗ No se pudo copiar automáticamente");
+                setTimeout(function(){setToast(null);}, 2500);
+              }
+            }}
+            style={{background:"#444",border:"1px solid #666",borderRadius:8,padding:"10px 20px",color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer"}}
+          >
+            📋 Copiar link para Safari
+          </button>
+        </div>
+        <button onClick={function(){setOrdenPreview(null);setShowOrden(true);}} style={{background:"rgba(255,80,80,.2)",border:"1px solid rgba(255,80,80,.4)",borderRadius:8,padding:"7px 16px",color:"#ff8080",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+          ✕ Volver
+        </button>
+      </div>
+      <iframe id="orden-preview-iframe" srcDoc={ordenPreview} style={{flex:1,border:"none",background:"#fff"}} title="Orden de Producción"/>
     </div>
   );
 
@@ -2029,14 +2790,22 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
               const nombre = ((cliente.nombre+" "+cliente.apellido).trim()||"Cotizacion").replace(/\s+/g,"_");
               const fechaStr = new Date().toISOString().slice(0,10);
               const fileName = "Cotizacion_TBC_"+nombre+"_"+fechaStr+".html";
-              const base64 = btoa(unescape(encodeURIComponent(preview)));
-              const dataUrl = "data:text/html;base64,"+base64;
-              const a = document.createElement("a");
-              a.href = dataUrl;
-              a.download = fileName;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
+              try {
+                const blob = new Blob([preview], {type:"text/html"});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+                setToast("✓ Descargando "+fileName);
+                setTimeout(function(){setToast(null);}, 2500);
+              } catch(err) {
+                setToast("✗ No se pudo descargar");
+                setTimeout(function(){setToast(null);}, 2500);
+              }
             }}
             style={{background:C.gold,border:"none",borderRadius:8,padding:"10px 20px",color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer"}}
           >
@@ -2077,17 +2846,46 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
           >
             📋 Copiar link para Safari
           </button>
+          <button
+            onClick={function(){ setShowOrden(true); }}
+            style={{background:"#2a6a4a",border:"1px solid #3a8a5a",borderRadius:8,padding:"10px 20px",color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer"}}
+          >
+            🏭 Proceder a Orden
+          </button>
         </div>
         <button onClick={function(){setPreview(null);}} style={{background:"rgba(255,80,80,.2)",border:"1px solid rgba(255,80,80,.4)",borderRadius:8,padding:"7px 16px",color:"#ff8080",fontSize:13,fontWeight:700,cursor:"pointer"}}>
           ✕ Volver
         </button>
       </div>
+      {showOrden && (
+        <OrdenProduccion
+          pieces={enrichedPieces}
+          telas={telas}
+          confecciones={confecciones}
+          rielesCustom={rielesCustom}
+          cliente={cliente}
+          numCotizacion={numCotizacion}
+          empresa={empresa}
+          ordenData={ordenData}
+          setOrdenData={setOrdenData}
+          onClose={function(){ setShowOrden(false); }}
+          onSacarOrden={handleSacarOrden}
+        />
+      )}
       <iframe id="preview-iframe" srcDoc={preview} style={{flex:1,border:"none",background:"#fff"}} title="Cotización TBC"/>
     </div>
   );
 
   return(
     <div style={S.wrap}>
+      {loadingQR&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:9998,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:"#1a1a1a",border:"1px solid #333",borderRadius:14,padding:"24px 32px",textAlign:"center"}}>
+            <div style={{fontSize:24,marginBottom:10}}>⏳</div>
+            <div style={{color:"#fff",fontWeight:600,fontSize:13}}>Generando cotización...</div>
+          </div>
+        </div>
+      )}
       {toast&&(
         <div style={{position:"fixed",bottom:32,left:"50%",transform:"translateX(-50%)",background:"#1a1a1a",border:"1px solid #333",borderRadius:10,padding:"12px 24px",color:"#fff",fontSize:13,fontWeight:600,zIndex:99999,boxShadow:"0 4px 20px rgba(0,0,0,.4)",whiteSpace:"nowrap"}}>
           {toast}
@@ -2098,20 +2896,27 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
         <div style={{marginLeft:16,borderLeft:"1px solid #e8e8e8",paddingLeft:20,flex:1}}>
           <div style={{fontSize:11,color:"#999",letterSpacing:1.5,textTransform:"uppercase",fontWeight:500}}>Cotizador</div>
         </div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          {!onlyEmpresa&&<button
-            onClick={function(){setEmpresa("");}}
-            style={{background:"transparent",border:"1px solid #ddd",borderRadius:8,padding:"6px 12px",color:"#999",fontSize:11,cursor:"pointer"}}
-          >
-            Cambiar empresa
-          </button>}
-          {onLogout&&<button
-            onClick={onLogout}
-            style={{background:"transparent",border:"1px solid #ffaaaa",borderRadius:8,padding:"6px 12px",color:"#cc6666",fontSize:11,cursor:"pointer"}}
-          >
-            Cerrar sesión
-          </button>}
-        </div>
+        <button
+          onClick={function(){setEmpresa("");}}
+          style={{background:"transparent",border:"1px solid #ddd",borderRadius:8,padding:"6px 12px",color:"#999",fontSize:11,cursor:"pointer"}}
+        >
+          Cambiar empresa
+        </button>
+        <button
+          onClick={function(){fileInputRef.current && fileInputRef.current.click();}}
+          disabled={loadingQR}
+          style={{background:"transparent",border:"1px solid #555",borderRadius:8,padding:"6px 12px",color:"#aaa",fontSize:11,cursor:"pointer",opacity:loadingQR?0.5:1}}
+          title="Cargar cotización desde PDF"
+        >
+          {loadingQR?"⏳":"📂"} Cargar
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,application/pdf"
+          style={{display:"none"}}
+          onChange={handleLoadFromFile}
+        />
       </div>
       <div style={S.page}>
         <div style={S.card}>
@@ -2126,18 +2931,18 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
         </div>
 
         <div style={S.sectionLabel}>🪟 Piezas a Cotizar</div>
-        {pieces.map(function(p,i){return(
-          <PieceCard key={p.id} p={p} idx={i} onChange={function(v,action){updatePiece(i,v,action);}} onRemove={function(){removePiece(i);}} telas={telas} setTelas={setTelas} confecciones={confecciones} setConfecciones={setConfecciones}/>
+        {enrichedPieces.map(function(p,i){return(
+          <PieceCard key={p.id} p={p} idx={i} onChange={function(v,action){updatePiece(i,v,action);}} onRemove={function(){removePiece(i);}} telas={telas} setTelas={setTelas} confecciones={confecciones} setConfecciones={setConfecciones} rielesCustom={rielesCustom} setRielesCustom={setRielesCustom} motoresCustom={motoresCustom} setMotoresCustom={setMotoresCustom} controlesCustom={controlesCustom} setControlesCustom={setControlesCustom} cenefasCustom={cenefasCustom} setCenefasCustom={setCenefasCustom} makePendingHandler={makePendingHandler}/>
         );})}
         <div style={S.pieceAddBtn} onClick={function(){setPieces(function(ps){return[...ps,newPiece()];});}}>+ Agregar Pieza</div>
 
         <div style={{...S.card,marginTop:20,borderColor:"rgba(76,175,125,.2)"}}>
-          <ExtrasSection extras={globalExtras} onChange={setGlobalExtras}/>
+          <ExtrasSection extras={globalExtras} onChange={setGlobalExtras} onPendingChange={setExtrasPendiente}/>
         </div>
 
         <div style={{...S.card,marginTop:8,borderColor:"rgba(201,168,76,.4)"}}>
           <div style={S.sectionLabel}>💰 Resumen y Totales</div>
-          <PiecesSummary pieces={pieces} telas={telas} confecciones={confecciones}/>
+          <PiecesSummary pieces={enrichedPieces} telas={telas} confecciones={confecciones} rielesCustom={rielesCustom}/>
           <GlobalExtrasSummary extras={globalExtras}/>
           <div style={S.divider}/>
           <div style={{...S.priceRow,marginBottom:8}}><span style={{color:C.text,fontWeight:600}}>Subtotal</span><span style={{color:C.goldL,fontWeight:700}}>{fmt(subtotalBruto)}</span></div>
@@ -2171,16 +2976,27 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
           <div style={S.priceRow}><span>ITBMS ({itbms}%)</span><span>{fmt(itbmsAmt)}</span></div>
           <div style={S.totalRow}><span>TOTAL FINAL</span><span>{fmt(totalFinal)}</span></div>
           <div style={{fontSize:10,color:"#888",marginTop:6}}>* Válido por 30 días. Precios en USD.</div>
+          <div style={S.divider}/>
+          <div style={S.field}>
+            <div style={S.lbl}>💬 Comentarios / Notas adicionales</div>
+            <textarea
+              style={{...S.inp,minHeight:80,resize:"vertical",fontFamily:"inherit",lineHeight:1.6}}
+              placeholder="Ej: Incluye garantía de 1 año, tiempo de entrega estimado 15 días hábiles..."
+              value={comentarios}
+              onChange={function(e){setComentarios(e.target.value);}}
+            />
+          </div>
         </div>
 
         {(function(){
           const invalidPieces=pieces.filter(function(p){return !isPieceValid(p,telas);});
-          if(invalidPieces.length>0){
+          const hayErrores=invalidPieces.length>0||extrasPendiente||hayCustomPendiente;
+          if(hayErrores){
             return(
               <div style={{marginTop:20}}>
                 <div style={{background:"rgba(224,85,85,.1)",border:"1px solid rgba(224,85,85,.3)",borderRadius:12,padding:"14px 18px",marginBottom:10}}>
-                  <div style={{color:"#E05555",fontWeight:700,fontSize:13,marginBottom:8}}>⚠ Completa los campos obligatorios antes de generar la cotización:</div>
-                  {invalidPieces.map(function(p,i){
+                  <div style={{color:"#E05555",fontWeight:700,fontSize:13,marginBottom:8}}>⚠ Corrige lo siguiente antes de generar la cotización:</div>
+                  {invalidPieces.map(function(p){
                     const errs=validatePiece(p,telas);
                     const idx=pieces.indexOf(p);
                     return(
@@ -2189,6 +3005,16 @@ export default function CotizadorTBC({defaultEmpresa, onlyEmpresa, onLogout}){
                       </div>
                     );
                   })}
+                  {extrasPendiente&&(
+                    <div style={{fontSize:12,color:"#ff8080",marginTop:invalidPieces.length>0?8:0}}>
+                      <strong>Artículos extras:</strong> Hay un artículo en proceso que no fue agregado. Tocá "Agregar" para confirmarlo o borrá lo que escribiste.
+                    </div>
+                  )}
+                  {hayCustomPendiente&&(
+                    <div style={{fontSize:12,color:"#ff8080",marginTop:(invalidPieces.length>0||extrasPendiente)?8:0}}>
+                      <strong>Producto personalizado:</strong> Hay un motor, control o cenefa personalizado en proceso que no fue agregado. Tocá "Confirmar agregar" o cancelá lo que escribiste.
+                    </div>
+                  )}
                 </div>
                 <button style={{...S.genBtn,marginTop:0,opacity:0.4,cursor:"not-allowed"}} disabled>
                   📄 Ver Cotización PDF
