@@ -43,9 +43,14 @@ async function decompressState(blob) {
     let inner = blob;
     if (inner.indexOf(COTBC_PREFIX) !== -1) inner = inner.slice(inner.indexOf(COTBC_PREFIX) + COTBC_PREFIX.length);
     if (inner.indexOf(COTBC_SUFFIX) !== -1) inner = inner.slice(0, inner.indexOf(COTBC_SUFFIX));
-    // Intento principal: todo el hex junto
+    // Intento 1: todo el hex junto (quita caracteres no-hex)
     const r1 = tryDecode(inner);
     if (r1) return r1;
+    // Intento 2: extraer solo secuencias hex largas (>=8 chars) y concatenarlas
+    // Esto descarta eficazmente la basura del pie que viene en strings cortos
+    const longHex = (inner.toLowerCase().match(/[0-9a-f]{8,}/g) || []).join("");
+    const r2 = tryDecode(longHex);
+    if (r2) return r2;
     return null;
   } catch(e) { return null; }
 }
@@ -63,15 +68,32 @@ async function readStateFromPDF(file) {
     const content = await page.getTextContent();
     content.items.forEach(function(it){
       const s = it.str || "";
-      // Descartar items que son basura del pie de página agregada por el visor
+      const st = s.trim();
+      // No filtrar items que contienen los delimitadores del bloque de datos
+      if (s.indexOf(COTBC_PREFIX) !== -1 || s.indexOf(COTBC_SUFFIX) !== -1) {
+        fullText += s; return;
+      }
+      // Filtrar basura del pie de página de Safari (múltiples formatos posibles)
       if (s.indexOf("data:text/html") !== -1) return;
       if (s.indexOf("Cotizacion_TBC") !== -1) return;
-      if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s.trim())) return; // fecha tipo 15/6/26
-      if (/^\d{1,2}:\d{2}/.test(s.trim())) return; // hora tipo 11:11
-      if (/^\d+\/\d+$/.test(s.trim())) return; // número de página tipo 2/3
+      if (s.indexOf("Orden_Produccion") !== -1) return;
+      // Fechas: 15/6/26, 06/16/26, 15/6/2026, etc. (con o sin coma y hora)
+      if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(st)) return;
+      // Horas: 11:11, 11:52 a. m., 11:52 p. m., etc.
+      if (/^\d{1,2}:\d{2}(\s*(a\.\s*m\.|p\.\s*m\.|AM|PM))?$/i.test(st)) return;
+      // Números de página: 2/3, 1/7
+      if (/^\d+\/\d+$/.test(st)) return;
+      // Páginas en español: "Página 1 de 7", "Página 2 de 7"
+      if (/^[Pp]ágina\s+\d+\s+de\s+\d+$/.test(st)) return;
+      // Pages en inglés: "Page 1 of 7"
+      if (/^[Pp]age\s+\d+\s+of\s+\d+$/.test(st)) return;
+      // Nombre de archivo solo
+      if (/^Cotizacion_TBC_[^\s]+$/.test(st)) return;
+      if (/^Orden_Produccion_[^\s]+$/.test(st)) return;
       fullText += s;
     });
   }
+  // Buscar el bloque entre delimitadores
   const start = fullText.indexOf(COTBC_PREFIX);
   const end = fullText.indexOf(COTBC_SUFFIX);
   if (start === -1 || end === -1 || end < start) return null;
@@ -2082,7 +2104,7 @@ function PiecesSummary({pieces,telas,confecciones,rielesCustom}){
 
 // ─── ORDEN DE PRODUCCIÓN ────────────────────────────────────────────────────
 // Campos requeridos por tipo de producto
-function camposOrdenPorTipo(tipo){
+function camposOrdenPorTipo(tipo, p){
   if(tipo==="PERSIANA")return [
     {key:"colorTela",label:"Color y código de tela",type:"text",req:true,mem:"colorTela"},
     {key:"contrapeso",label:"Tipo de contrapeso",type:"text",req:true,mem:"contrapeso"},
@@ -2090,11 +2112,17 @@ function camposOrdenPorTipo(tipo){
     {key:"enrollado",label:"Enrollado",type:"select",options:["Regular","Trasero"],req:true},
     {key:"notas",label:"Notas",type:"text",req:false},
   ];
-  if(tipo==="CORTINA DE TELA")return [
-    {key:"tipoBasta",label:"Tipo de basta",type:"text",req:true,mem:"tipoBasta"},
-    {key:"instalacion",label:"Instalación",type:"select",options:["Pared","Techo"],req:true},
-    {key:"notas",label:"Notas",type:"text",req:false},
-  ];
+  if(tipo==="CORTINA DE TELA"){
+    const campos = [
+      {key:"tipoBasta",label:"Tipo de basta",type:"text",req:true,mem:"tipoBasta"},
+      {key:"instalacion",label:"Instalación",type:"select",options:["Pared","Techo"],req:true},
+    ];
+    if(p && p.dosVias===true){
+      campos.push({key:"recoge",label:"Recoge hacia",type:"select",options:["Derecha","Izquierda"],req:true});
+    }
+    campos.push({key:"notas",label:"Notas",type:"text",req:false});
+    return campos;
+  }
   if(tipo==="TOLDO VERTICAL"||tipo==="PÉRGOLA BRAZO EXTENSIBLE")return [
     {key:"colorTela",label:"Color y código de tela",type:"text",req:true,mem:"colorTela"},
     {key:"notas",label:"Notas",type:"text",req:false},
@@ -2110,7 +2138,7 @@ function piezasProduccion(pieces){
 }
 
 function ordenPieceComplete(piece, datos){
-  const campos=camposOrdenPorTipo(piece.tipoProducto);
+  const campos=camposOrdenPorTipo(piece.tipoProducto, piece);
   const d=datos||{};
   return campos.every(function(c){ return !c.req || (d[c.key]!==undefined && String(d[c.key]).trim()!==""); });
 }
@@ -2134,10 +2162,10 @@ function buildOrdenHTML(prod, ordenData, telas, confecciones, rielesCustom, moto
   ];
 
   function filaDato(label, valor){
-    return `<td style="padding:8px 10px;border:1px solid #ddd;vertical-align:top">
-      <div style="font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:#999;font-weight:700;margin-bottom:3px">${esc(label)}</div>
-      <div style="font-size:12px;color:#111;font-weight:600">${esc(valor||"—")}</div>
-    </td>`;
+    return `<div style="padding:8px 10px;background:#fff;border:1px solid #e8e8e8;border-radius:6px;min-width:0">
+      <div style="font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:#999;font-weight:700;margin-bottom:3px;white-space:nowrap">${esc(label)}</div>
+      <div style="font-size:11px;color:#111;font-weight:700;word-break:break-word">${esc(valor||"—")}</div>
+    </div>`;
   }
 
   let secciones = "";
@@ -2150,47 +2178,60 @@ function buildOrdenHTML(prod, ordenData, telas, confecciones, rielesCustom, moto
       const producto = descProductoPieza(p, telas);
       const medidas = (p.ancho&&p.alto) ? (p.ancho+" × "+p.alto+" cm") : "—";
       const cant = parseInt(p.cantidad)||1;
-      let celdas = "";
-      celdas += filaDato("Pieza", "#"+(i+1));
-      celdas += filaDato("Área", p.area);
-      celdas += filaDato("Producto", producto);
-      celdas += filaDato("Medidas", medidas);
-      if(cant>1) celdas += filaDato("Cantidad", cant);
+      const imgSrc = getProductImage(p, telas);
+
+      // Datos base siempre presentes
+      let bloques = "";
+      bloques += filaDato("Área", p.area);
+      bloques += filaDato("Producto", producto);
+      bloques += filaDato("Medidas", medidas);
+      if(cant>1) bloques += filaDato("Cantidad", String(cant));
+
+      // Datos específicos por tipo
       if(t.tipo==="PERSIANA"){
-        if(p.tipoAccionamiento==="MOTORIZADA"){ celdas += filaDato("Motor", motorNombre(p)); celdas += filaDato("Control", controlNombre(p)); }
-        celdas += filaDato("Color/código tela", d.colorTela);
-        celdas += filaDato("Tipo de contrapeso", d.contrapeso);
-        celdas += filaDato("Mando", d.mando);
-        celdas += filaDato("Enrollado", d.enrollado);
+        if(p.tipoAccionamiento==="MOTORIZADA"){
+          bloques += filaDato("Motor", motorNombre(p));
+          bloques += filaDato("Control", controlNombre(p));
+        }
+        bloques += filaDato("Color/código tela", d.colorTela);
+        bloques += filaDato("Tipo de contrapeso", d.contrapeso);
+        bloques += filaDato("Mando", d.mando);
+        bloques += filaDato("Enrollado", d.enrollado);
       } else if(t.tipo==="CORTINA DE TELA"){
-        const tela=[...(telas||[])].find(function(x){return x.id===p.telaId;});
         const conf=[...(confecciones||[])].find(function(x){return x.id===p.confeccionId;});
         const riel=[...RIELES,...(rielesCustom||[])].find(function(x){return x.id===p.rielId;});
-        celdas += filaDato("Confección", conf?conf.nombre:"—");
-        celdas += filaDato("Riel", riel?riel.nombre:"—");
-        celdas += filaDato("Vías", p.dosVias?"2 vías":"1 vía");
-        celdas += filaDato("Tipo de basta", d.tipoBasta);
-        celdas += filaDato("Instalación", d.instalacion);
+        bloques += filaDato("Confección", conf?conf.nombre:"—");
+        bloques += filaDato("Riel", riel?riel.nombre:"—");
+        bloques += filaDato("Vías", p.dosVias?"2 vías":"1 vía");
+        bloques += filaDato("Tipo de basta", d.tipoBasta);
+        bloques += filaDato("Instalación", d.instalacion);
+        if(p.dosVias===true) bloques += filaDato("Recoge hacia", d.recoge);
       } else {
-        if(p.tipoAccionamiento==="MOTORIZADA"){ celdas += filaDato("Motor", motorNombre(p)); celdas += filaDato("Control", controlNombre(p)); }
-        celdas += filaDato("Color/código tela", d.colorTela);
+        if(p.tipoAccionamiento==="MOTORIZADA"){
+          bloques += filaDato("Motor", motorNombre(p));
+          bloques += filaDato("Control", controlNombre(p));
+        }
+        bloques += filaDato("Color/código tela", d.colorTela);
       }
-      const notas = d.notas ? `<tr><td colspan="6" style="padding:8px 10px;border:1px solid #ddd;background:#fafafa"><span style="font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:#999;font-weight:700">Notas: </span><span style="font-size:11px;color:#333">${esc(d.notas)}</span></td></tr>` : "";
-      const imgSrc = getProductImage(p, telas);
-      const imgBlock = imgSrc ? `<div style="flex-shrink:0;width:90px;height:68px;border-radius:6px;overflow:hidden;border:1px solid #e0e0e0"><img src="${imgSrc}" style="width:100%;height:100%;object-fit:cover" /></div>` : "";
-      filas += `<div style="margin-bottom:14px;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;page-break-inside:avoid">
-        <div style="display:flex;gap:12px;align-items:stretch">
-          ${imgSrc?`<div style="padding:10px 0 10px 10px;display:flex;align-items:center">${imgBlock}</div>`:""}
-          <div style="flex:1;min-width:0">
-            <table style="width:100%;border-collapse:collapse;table-layout:fixed"><tbody>
-              <tr>${celdas}</tr>
-              ${notas}
-            </tbody></table>
+
+      const notasBlock = d.notas
+        ? `<div style="margin-top:8px;padding:8px 10px;background:#fafafa;border:1px solid #e8e8e8;border-radius:6px;font-size:11px;color:#333"><span style="font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:#999;font-weight:700;margin-right:6px">Notas:</span>${esc(d.notas)}</div>`
+        : "";
+
+      filas += `<div style="margin-bottom:16px;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;page-break-inside:avoid">
+        <div style="background:${t.color}18;border-bottom:2px solid ${t.color};padding:8px 12px;display:flex;align-items:center;gap:10px">
+          ${imgSrc?`<img src="${imgSrc}" style="width:44px;height:34px;object-fit:cover;border-radius:4px;flex-shrink:0;border:1px solid ${t.color}44"/>`:""}
+          <span style="font-size:13px;font-weight:900;color:${t.color}">Pieza #${i+1}</span>
+        </div>
+        <div style="padding:10px 12px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px">
+            ${bloques}
           </div>
+          ${notasBlock}
         </div>
       </div>`;
     });
-    secciones += `<div style="margin-top:22px;page-break-inside:avoid">
+    secciones += `<div style="margin-top:22px">
       <div style="background:${t.color};color:#fff;padding:8px 14px;border-radius:6px 6px 0 0;font-size:13px;font-weight:800;letter-spacing:.5px">${t.titulo} <span style="opacity:.8;font-weight:600">(${piezas.length})</span></div>
       <div style="padding:14px;background:#fff;border:1px solid #e8e8e8;border-top:none;border-radius:0 0 8px 8px">${filas}</div>
     </div>`;
@@ -2292,7 +2333,7 @@ function OrdenProduccion({pieces, telas, confecciones, rielesCustom, cliente, nu
         )}
 
         {prod.map(function(p, idx){
-          const campos = camposOrdenPorTipo(p.tipoProducto);
+          const campos = camposOrdenPorTipo(p.tipoProducto, p);
           const datos = ordenData[p.id] || {};
           const complete = ordenPieceComplete(p, datos);
           const tipoColor = p.tipoProducto==="PERSIANA"?C.gold:(p.tipoProducto==="CORTINA DE TELA"?"#64c8b4":"#50a0dc");
