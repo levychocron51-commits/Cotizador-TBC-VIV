@@ -454,22 +454,20 @@ function buildDesc(p,telas,confecciones,rielesCustom){
   if(p.tipoProducto==="PERSIANA"){
     if(p.tipoPersiana)parts.push(p.tipoPersiana);
     if(p.tipoAccionamiento==="MOTORIZADA"){
-      const m=MOTORES.find(x=>x.id===p.motorId);
+      const m=[...MOTORES,...(p._motoresCustom||[])].find(x=>x.id===p.motorId);
       if(m){
-        // Strip "Motor" prefix if already in name to avoid duplication
         const mName=m.nombre.replace(/^Motor\s+/i,"");
         parts.push("MOTOR "+mName.toUpperCase());
       }
-      const ctrl=PERSIANA_CONTROLES.find(x=>x.id===p.controlId);
+      const ctrl=[...PERSIANA_CONTROLES,...(p._controlesCustom||[])].find(x=>x.id===p.controlId);
       if(ctrl){
         const cName=ctrl.nombre.replace(/^Control\s+/i,"");
         parts.push("CONTROL "+cName.toUpperCase());
       }
     }
     if(p.cenefa){
-      const cn=CENEFAS.find(x=>x.id===p.cenefaId);
+      const cn=[...CENEFAS,...(p._cenefasCustom||[])].find(x=>x.id===p.cenefaId);
       if(cn){
-        // Strip "Cenefa" prefix from name
         const cnName=cn.nombre.replace(/^Cenefa\s+/i,"");
         parts.push("CENEFA "+cnName.toUpperCase());
       }
@@ -2583,7 +2581,7 @@ export default function CotizadorTBC(){
       const headerRow = data.length;
 
       let rowNum = 1;
-      pieces.forEach(function(p) {
+      enrichedPieces.forEach(function(p) {
         const isPersiana = p.tipoProducto === "PERSIANA";
         const qty = parseInt(p.cantidad)||1;
         const desc = buildDesc(p,telas,confecciones,rielesCustom||[]);
