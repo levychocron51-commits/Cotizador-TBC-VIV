@@ -418,12 +418,16 @@ function calcPapelRollos(p) {
     if (!anchoPared || !altoPared) return { nombre: pared.nombre, rollos: 0, skip: true };
     const altoEfectivo = repeticion > 0 ? altoPared + (repeticion / 2) : altoPared;
     const tirasPared = Math.ceil(anchoPared / anchoRollo);
-    const tirasPorRollo = Math.ceil(largoRollo / altoEfectivo);
+    const tirasPorRollo = Math.floor(largoRollo / altoEfectivo); // solo tiras COMPLETAS: sin uniones horizontales, el sobrante del rollo se descarta
+    if (tirasPorRollo < 1) {
+      totalRollos += 0;
+      return { nombre: pared.nombre, anchoPared, altoPared, altoEfectivo, tirasPared, tirasPorRollo: 0, rollosPared: 0, imposible: true };
+    }
     const rollosPared = Math.ceil(tirasPared / tirasPorRollo);
     totalRollos += rollosPared;
     return { nombre: pared.nombre, anchoPared, altoPared, altoEfectivo, tirasPared, tirasPorRollo, rollosPared };
   });
-  const totalConDesperdicio = Math.ceil(totalRollos * 1.10);
+  const totalConDesperdicio = totalRollos;
   return { detalle, totalRollos, totalConDesperdicio };
 }
 
@@ -1516,12 +1520,15 @@ function PapelForm({p, update, errors}) {
             <div style={{marginTop:12,padding:"10px 14px",background:"rgba(76,175,125,.06)",border:"1px solid rgba(76,175,125,.15)",borderRadius:8}}>
               <div style={{fontSize:11,color:"#4CAF7D",fontWeight:700,marginBottom:4}}>Resultado del cálculo:</div>
               {calcR.detalle.filter(function(d){return !d.skip;}).map(function(d,i){
+                if(d.imposible)return <div key={i} style={{fontSize:10,color:"#ff8080",marginBottom:2}}>
+                  {d.nombre||"Pared "+(i+1)}: ⚠ El alto de la pared ({d.altoEfectivo}cm con repetición) supera el largo del rollo — requeriría unión horizontal (no permitida). Verificá las medidas.
+                </div>;
                 return <div key={i} style={{fontSize:10,color:"#aaa",marginBottom:2}}>
-                  {d.nombre||"Pared "+(i+1)}: {d.tirasPared} tiras / {d.tirasPorRollo} tiras por rollo = <strong style={{color:"#fff"}}>{d.rollosPared} rollo{d.rollosPared!==1?"s":""}</strong>
+                  {d.nombre||"Pared "+(i+1)}: {d.tirasPared} tiras / {d.tirasPorRollo} tiras completas por rollo = <strong style={{color:"#fff"}}>{d.rollosPared} rollo{d.rollosPared!==1?"s":""}</strong>
                 </div>;
               })}
               <div style={{fontSize:12,color:"#4CAF7D",fontWeight:700,marginTop:6}}>
-                Total: {calcR.totalRollos} rollos + 10% desperdicio = <strong>{calcR.totalConDesperdicio} rollos</strong>
+                Total: <strong>{calcR.totalConDesperdicio} rollos</strong> (sin uniones horizontales, sobrante de rollo descartado)
               </div>
             </div>
           )}
@@ -2117,7 +2124,7 @@ function camposOrdenPorTipo(tipo, p){
       {key:"tipoBasta",label:"Tipo de basta",type:"text",req:true,mem:"tipoBasta"},
       {key:"instalacion",label:"Instalación",type:"select",options:["Pared","Techo"],req:true},
     ];
-    if(p && p.dosVias===true){
+    if(p && p.dosVias===false){
       campos.push({key:"recoge",label:"Recoge hacia",type:"select",options:["Derecha","Izquierda"],req:true});
     }
     campos.push({key:"notas",label:"Notas",type:"text",req:false});
@@ -2205,7 +2212,7 @@ function buildOrdenHTML(prod, ordenData, telas, confecciones, rielesCustom, moto
         bloques += filaDato("Vías", p.dosVias?"2 vías":"1 vía");
         bloques += filaDato("Tipo de basta", d.tipoBasta);
         bloques += filaDato("Instalación", d.instalacion);
-        if(p.dosVias===true) bloques += filaDato("Recoge hacia", d.recoge);
+        if(p.dosVias===false) bloques += filaDato("Recoge hacia", d.recoge);
       } else {
         if(p.tipoAccionamiento==="MOTORIZADA"){
           bloques += filaDato("Motor", motorNombre(p));
