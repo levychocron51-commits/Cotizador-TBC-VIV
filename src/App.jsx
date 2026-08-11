@@ -1824,6 +1824,8 @@ function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,e
   const fecha=new Date().toLocaleDateString("es-CR");
   if(!numCotizacion)numCotizacion=generarNumCotizacion(empresa);
   const f=(n)=>"$"+(Number(n||0).toFixed(2));
+  // Factor de ajuste global: 0.90 = -10%, 1.1 = +10%, 1 = sin cambio. Uso interno, nunca se muestra.
+  const factorAjuste=(descuento&&parseFloat(descuento)>0)?parseFloat(descuento):1;
   const hayPapelOOtro=pieces.some(function(p){return p.tipoProducto==="PAPEL DE PARED"||p.tipoProducto==="OTRO";});
   const persianasYCortinas=pieces.filter(function(p){return p.tipoProducto==="PERSIANA"||p.tipoProducto==="CORTINA DE TELA"||p.tipoProducto==="TOLDO VERTICAL"||p.tipoProducto==="PÉRGOLA BRAZO EXTENSIBLE";});
   const todasConInstalacion=persianasYCortinas.length>0&&persianasYCortinas.every(function(p){return p.incluyeInstalacion;});
@@ -1920,6 +1922,10 @@ function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,e
     } else if(isOtro){
       cantDisplay=parseInt(p.otroCantidad)||1;
     }
+    // Factor de ajuste global (uso interno, no se muestra en el documento)
+    precioLista=precioLista*factorAjuste;
+    precioDesc=precioDesc*factorAjuste;
+    total=total*factorAjuste;
     return `<tr style="border-bottom:1px solid #e8e8e8">
       <td style="padding:10px 8px;vertical-align:middle">${ph}</td>
       <td style="padding:10px 8px;font-weight:600;text-align:center;vertical-align:middle">${p.area||"—"}</td>
@@ -1934,7 +1940,7 @@ function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,e
   const extraRows=globalExtras.map(function(e,i){
     const pr=parseFloat(e.precio)||0;
     const q=e.isML?(parseFloat(e.metros)||0):(parseInt(e.cantidad)||1);
-    const precioDesc=pr*q;
+    const precioDesc=pr*q*factorAjuste;
     const precioLista=precioDesc*1.40;
     const extraImg=getExtraImage(e.nombre);
     const ph=extraImg
@@ -1952,9 +1958,7 @@ function buildPDF(cliente,pieces,telas,confecciones,viatico,itbms,globalExtras,e
     if(p.tipoProducto==="OTRO")return sum+calcOtroTotal(p);
     return sum;
   },0)+extrasTotal(globalExtras);
-  const descuentoExtra=descuento>0?descuento:0;
-  const descuentoAmt=subtotalBruto*(descuentoExtra/100);
-  const subtotal=subtotalBruto-descuentoAmt;
+  const subtotal=subtotalBruto*factorAjuste;
   const itbmsAmt=(subtotal+viatico)*(itbms/100);
   const grandTotal=subtotal+viatico+itbmsAmt;
 
@@ -2014,16 +2018,8 @@ ${instalacionMsg?'<div style="background:#f0f9f0;border:1px solid #c0e0c0;border
   </tr>
   <tr>
     <td colspan="6" style="padding:4px 14px;text-align:right;color:#555;font-size:11px">Subtotal</td>
-    <td style="padding:4px 14px;text-align:right;font-size:11px">${f(subtotalBruto)}</td>
-  </tr>
-  ${descuentoExtra>0?`<tr>
-    <td colspan="6" style="padding:4px 14px;text-align:right;color:#2a7a4a;font-size:11px;font-weight:600">Descuento (${descuentoExtra}%)</td>
-    <td style="padding:4px 14px;text-align:right;font-size:11px;color:#2a7a4a;font-weight:600">- ${f(descuentoAmt)}</td>
-  </tr>
-  <tr>
-    <td colspan="6" style="padding:4px 14px;text-align:right;color:#555;font-size:11px">Subtotal con descuento</td>
     <td style="padding:4px 14px;text-align:right;font-size:11px">${f(subtotal)}</td>
-  </tr>`:""}
+  </tr>
   <tr>
     <td colspan="6" style="padding:4px 14px;text-align:right;color:#555;font-size:11px">ITBMS (${itbms}%)</td>
     <td style="padding:4px 14px;text-align:right;font-size:11px">${f(itbmsAmt)}</td>
@@ -2505,8 +2501,8 @@ export default function CotizadorTBC(){
     return sum;
   },0);
   const subtotalBruto=piecesTotal+extrasTotal(globalExtras);
-  const descuentoAmt=descuento>0?subtotalBruto*(descuento/100):0;
-  const grandTotal=subtotalBruto-descuentoAmt;
+  const factorAjuste=(descuento&&parseFloat(descuento)>0)?parseFloat(descuento):1;
+  const grandTotal=subtotalBruto*factorAjuste;
   const itbmsAmt=(grandTotal+viatico)*(itbms/100);
   const totalFinal=grandTotal+viatico+itbmsAmt;
 
@@ -2994,12 +2990,12 @@ export default function CotizadorTBC(){
           <div style={{...S.priceRow,marginBottom:8}}><span style={{color:C.text,fontWeight:600}}>Subtotal</span><span style={{color:C.goldL,fontWeight:700}}>{fmt(subtotalBruto)}</span></div>
           <div style={{...S.g3,marginBottom:10,alignItems:"flex-end"}}>
             <div style={S.field}>
-              <div style={S.lbl}>Descuento extra (%)</div>
-              <input type="number" step="0.1" style={S.inp} value={descuento||""}
+              <div style={S.lbl}>Factor de ajuste</div>
+              <input type="number" step="0.01" style={S.inp} value={descuento||""}
                 onChange={function(e){setDescuento(e.target.value===""?0:parseFloat(e.target.value)||0);}}
                 onBlur={function(e){const v=parseFloat(e.target.value);setDescuento(isNaN(v)?0:v);}}
-                placeholder="0"/>
-              <div style={S.tip}>Solo si aplica</div>
+                placeholder="1"/>
+              <div style={S.tip}>0.90 = −10% · 1.10 = +10% · vacío = sin cambio</div>
             </div>
             <div style={S.field}>
               <div style={S.lbl}>Viático ($) — sin ITBMS</div>
@@ -3016,8 +3012,7 @@ export default function CotizadorTBC(){
                 placeholder="7"/>
             </div>
           </div>
-          {descuento>0&&<div style={{...S.priceRow,color:"#4CAF7D"}}><span>Descuento extra ({descuento}%)</span><span>- {fmt(descuentoAmt)}</span></div>}
-          {descuento>0&&<div style={S.priceRow}><span>Subtotal con descuento</span><span>{fmt(grandTotal)}</span></div>}
+          {factorAjuste!==1&&<div style={{...S.priceRow,color:factorAjuste<1?"#4CAF7D":"#E0A055"}}><span>Ajuste aplicado (× {factorAjuste})</span><span>{fmt(grandTotal)}</span></div>}
           {viatico>0&&<div style={S.priceRow}><span>Viático</span><span>{fmt(viatico)}</span></div>}
           <div style={S.priceRow}><span>ITBMS ({itbms}%)</span><span>{fmt(itbmsAmt)}</span></div>
           <div style={S.totalRow}><span>TOTAL FINAL</span><span>{fmt(totalFinal)}</span></div>
